@@ -6,10 +6,12 @@ backend, no build step, no account — one HTML file. Search ~300M works, ingest
 every claim comes back with a numbered citation you can click through.
 
 ```bash
-cd ~/Documents/GitHub/citekit
+git clone https://github.com/watanabefam/citekit.git && cd citekit
 python3 -m http.server 8777        # or just double-click index.html
 open http://127.0.0.1:8777/index.html
 ```
+(An `http://` origin is needed rather than `file://` if you use the optional proxy —
+browsers send no `Origin` header to `file://`, which some APIs require.)
 
 Then: **Settings** → pick provider → paste key → search → tick papers → *Add +* → ask questions.
 Tick **dry run** first if you want to see the exact prompt before spending tokens.
