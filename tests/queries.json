@@ -1,0 +1,38 @@
+{
+  "_notes": [
+    "Graded relevance RUBRIC, not human judgments — stated as a limitation wherever results are reported.",
+    "Grade 3 = perfectly relevant: title carries >=2 core terms and no off-topic marker.",
+    "Grade 2 = highly relevant: title or abstract carries >=2 core terms.",
+    "Grade 1 = relevant: title or abstract carries 1 core term.",
+    "Grade 0 = not relevant.",
+    "Core terms are deliberately BROADER than the query string (synonyms, spelling variants, stems)",
+    "so a lexically-overlapping ranker cannot score well by matching the query words alone.",
+    "Queries 1-6 are the TRAIN split (used to set weights); 7-12 are the TEST split."
+  ],
+  "queries": [
+    { "id": "d1", "split": "train", "query": "structured literacy dyslexia reading intervention",
+      "core": ["dyslex", "literacy", "reading", "phonic", "decod", "spelling", "intervention", "instruction", "struggling reader"] },
+    { "id": "d2", "split": "train", "query": "systematic phonics instruction early readers",
+      "core": ["phonic", "decod", "early reading", "beginning read", "word reading", "alphabetic", "letter-sound"] },
+    { "id": "d3", "split": "train", "query": "reading fluency assessment primary school",
+      "core": ["fluency", "oral reading", "assessment", "curriculum-based", "primary", "elementary", "progress monitoring"] },
+    { "id": "d4", "split": "train", "query": "teacher professional development literacy instruction",
+      "core": ["professional development", "teacher", "training", "literacy", "coaching", "in-service", "pre-service"] },
+    { "id": "d5", "split": "train", "query": "retrieval augmented generation knowledge grounding",
+      "core": ["retrieval-augmented", "retrieval augmented", "RAG", "grounding", "knowledge", "hallucination", "language model"] },
+    { "id": "d6", "split": "train", "query": "large language model evaluation benchmark",
+      "core": ["benchmark", "evaluation", "large language model", "LLM", "performance", "accuracy"] },
+    { "id": "t1", "split": "test", "query": "vocabulary development reading comprehension children",
+      "core": ["vocabulary", "comprehension", "word knowledge", "children", "reading", "language development"] },
+    { "id": "t2", "split": "test", "query": "dyslexia screening identification risk kindergarten",
+      "core": ["dyslex", "screening", "identification", "risk", "kindergarten", "early", "predict"] },
+    { "id": "t3", "split": "test", "query": "morphological awareness spelling instruction",
+      "core": ["morpholog", "spelling", "word structure", "affix", "orthograph", "instruction"] },
+    { "id": "t4", "split": "test", "query": "home literacy environment parent child shared reading",
+      "core": ["home literacy", "parent", "shared reading", "book", "family", "preschool", "caregiver"] },
+    { "id": "t5", "split": "test", "query": "open access scholarly publishing citation advantage",
+      "core": ["open access", "citation", "publishing", "repository", "preprint", "impact"] },
+    { "id": "t6", "split": "test", "query": "reading intervention response to intervention tiered support",
+      "core": ["response to intervention", "tier", "intervention", "remediation", "reading", "support", "small group"] }
+  ]
+}

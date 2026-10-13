@@ -1,0 +1,1103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CiteKit — BYOK academic research workspace</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#161a21; --panel2:#1c2129; --line:#262c36;
+    --fg:#e6e9ef; --muted:#8d97a8; --accent:#5b9dff; --accent2:#37d39a; --warn:#ffb454;
+    --radius:10px; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+    --ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--fg);font:14px/1.5 var(--ui);display:flex;flex-direction:column;overflow:hidden}
+  header{display:flex;align-items:center;gap:14px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+  header h1{font-size:15px;margin:0;font-weight:600;letter-spacing:.2px}
+  header .badge{font-size:11px;color:var(--muted);border:1px solid var(--line);padding:2px 7px;border-radius:99px}
+  header .spacer{flex:1}
+  button{background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:var(--radius);
+    padding:7px 12px;font:inherit;cursor:pointer}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#07101f;font-weight:600}
+  button.primary:disabled{opacity:.45;cursor:not-allowed}
+  button.ghost{background:transparent}
+  button.tiny{padding:3px 8px;font-size:12px}
+  main{flex:1;display:grid;grid-template-columns:minmax(360px,44%) minmax(0,1fr);min-height:0}
+  /* min-width:0 on grid/flex children is required or a long unbroken string inside a
+     scrollable <pre>/table forces the column to its content width (this was 11,990px
+     of phantom width before it was fixed — only a real browser catches this). */
+  .pane{min-width:0;min-height:0;display:flex;flex-direction:column;border-right:1px solid var(--line)}
+  .pane:last-child{border-right:none}
+  .panehead{display:flex;gap:8px;align-items:center;padding:10px 12px;border-bottom:1px solid var(--line);background:var(--panel)}
+  .tab{padding:5px 10px;border-radius:99px;border:1px solid transparent;color:var(--muted);cursor:pointer;font-size:13px}
+  .tab.on{color:var(--fg);background:var(--panel2);border-color:var(--line)}
+  .scroll{overflow:auto;padding:12px;flex:1;min-height:0;min-width:0}
+  input[type=text],input[type=password],select,textarea{background:var(--panel2);border:1px solid var(--line);
+    color:var(--fg);border-radius:var(--radius);padding:8px 10px;font:inherit;width:100%}
+  .row{display:flex;gap:8px}
+  .srcbar{display:flex;gap:10px;flex-wrap:wrap;padding:8px 12px;border-bottom:1px solid var(--line);font-size:12px;color:var(--muted);background:var(--panel)}
+  .srcbar label{display:flex;gap:5px;align-items:center;cursor:pointer}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:10px 12px;margin-bottom:8px}
+  .card h3{margin:0 0 4px;font-size:13.5px;line-height:1.35;font-weight:600}
+  .card .meta{font-size:11.5px;color:var(--muted);margin-bottom:6px}
+  .card .abs{font-size:12.5px;color:#c3cad6;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+  .card .toprow{display:flex;align-items:baseline;gap:8px;margin-bottom:4px}
+  .card .toprow .links{margin-left:auto;display:flex;gap:8px;white-space:nowrap}
+  .card .acts{display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap}
+  .pill{font-size:10.5px;color:var(--muted);border:1px solid var(--line);border-radius:99px;padding:1px 7px}
+  .pill.oa{color:var(--accent2);border-color:#24503f}
+  .msg{border-radius:var(--radius);padding:10px 12px;margin-bottom:10px;border:1px solid var(--line);background:var(--panel)}
+  .msg.user{background:#1a2740;border-color:#24406b}
+  .msg .who{font-size:11px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.6px}
+  .md p{margin:.45em 0}
+  .md h2{font-size:14px;margin:.7em 0 .3em}
+  .md h3{font-size:13px;margin:.7em 0 .3em}
+  .md ul{margin:.4em 0 .4em 1.1em;padding:0}
+  .md li{margin:.2em 0}
+  .md code{font-family:var(--mono);font-size:12px;background:var(--panel2);padding:1px 4px;border-radius:4px}
+  sup.cite{color:var(--accent);cursor:pointer;font-weight:600;padding:0 1px}
+  table.src{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
+  table.src th,table.src td{border-top:1px solid var(--line);padding:5px 6px;text-align:left;vertical-align:top}
+  table.src th{color:var(--muted);font-weight:500}
+  a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+  .hint{font-size:11.5px;color:var(--muted)}
+  dialog{background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:14px;width:min(560px,92vw);padding:0}
+  dialog::backdrop{background:#0009}
+  .dlg{padding:16px}
+  .dlg h2{margin:0 0 12px;font-size:15px}
+  .field{margin-bottom:12px}
+  .field label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
+  .field .hint{margin-top:4px}
+  .status{font-size:12px;color:var(--muted);min-height:18px;padding:0 2px}
+  .spin{display:inline-block;width:10px;height:10px;border:2px solid var(--line);border-top-color:var(--accent);
+    border-radius:50%;animation:s .7s linear infinite;vertical-align:-1px;margin-right:6px}
+  @keyframes s{to{transform:rotate(360deg)}}
+  .empty{color:var(--muted);font-size:12.5px;padding:8px 2px}
+  details.copy{margin-top:6px}
+  details.copy summary{cursor:pointer;font-size:12px;color:var(--muted)}
+  pre{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:9px;overflow:auto;font:12px/1.45 var(--mono);max-height:340px}
+  .libitem{display:flex;gap:8px;align-items:flex-start;background:var(--panel);border:1px solid var(--line);
+    border-radius:var(--radius);padding:8px 10px;margin-bottom:6px;font-size:12.5px}
+  .libitem .t{flex:1}
+</style>
+</head>
+<body>
+<header>
+  <h1>CiteKit</h1>
+  <span class="badge" id="keyBadge">no key</span>
+  <span class="badge">BYOK · runs entirely in your browser</span>
+  <span class="spacer"></span>
+  <button class="ghost tiny" id="exportBtn">Export library</button>
+  <button class="ghost tiny" id="settingsBtn">Settings</button>
+</header>
+
+<main>
+  <section class="pane">
+    <div class="panehead">
+      <div class="tab on" data-tab="search">Discover</div>
+      <div class="tab" data-tab="library">Library <span id="libCount" class="hint"></span></div>
+      <span class="spacer" style="flex:1"></span>
+      <span class="hint" id="searchStatus"></span>
+    </div>
+
+    <div id="tab-search" style="display:flex;flex-direction:column;min-height:0;flex:1">
+      <div class="srcbar">
+        <label><input type="checkbox" id="src-openalex" checked> OpenAlex</label>
+        <label><input type="checkbox" id="src-crossref" checked> Crossref</label>
+        <label><input type="checkbox" id="src-epmc" checked> Europe PMC</label>
+        <label><input type="checkbox" id="src-eric"> ERIC (education)</label>
+        <label><input type="checkbox" id="src-doaj"> DOAJ (gold OA)</label>
+        <label><input type="checkbox" id="src-core"> CORE (OA aggregator)</label>
+        <label><input type="checkbox" id="src-pubmed"> PubMed</label>
+        <label><input type="checkbox" id="src-s2"> Semantic&nbsp;Scholar*</label>
+        <label><input type="checkbox" id="src-arxiv"> arXiv*</label>
+      </div>
+      <div style="padding:10px 12px 0">
+        <div class="row">
+          <input type="text" id="q" placeholder="e.g. retrieval augmented generation for clinical decision support">
+          <button class="primary" id="searchBtn">Search</button>
+        </div>
+        <div class="row" style="margin-top:8px;font-size:12px;color:var(--muted);align-items:center">
+          <label style="display:flex;gap:5px;align-items:center"><input type="checkbox" id="oaOnly"> open access only</label>
+          <span>· from <input type="text" id="yearFrom" style="width:64px;display:inline-block" placeholder="2015"></span>
+          <span>· * needs a proxy URL (Settings)</span>
+        </div>
+      </div>
+      <div class="scroll" id="results"><div class="empty">Run a search, tick the papers you want, press <b>Add&nbsp;+</b> — then ask questions in the right pane.</div></div>
+    </div>
+
+    <div id="tab-library" style="display:none;flex-direction:column;min-height:0;flex:1">
+      <div style="padding:10px 12px 0">
+        <div class="row">
+          <button class="tiny" id="uploadBtn">Add PDFs / text files</button>
+          <button class="tiny" id="pasteBtn">Paste text</button>
+          <span class="spacer" style="flex:1"></span>
+          <button class="tiny ghost" id="clearLib">Clear</button>
+        </div>
+        <input type="file" id="file" multiple accept=".pdf,.txt,.md,.json,.docx" style="display:none">
+        <div class="hint" style="margin-top:6px">PDFs are parsed locally with pdf.js — nothing is uploaded anywhere.</div>
+      </div>
+      <div class="scroll" id="libList"></div>
+    </div>
+  </section>
+
+  <section class="pane">
+    <div class="panehead">
+      <strong style="font-size:13px">Research Assistant</strong>
+      <span class="hint" id="modeHint">grounded answers with [n] citations</span>
+      <span class="spacer" style="flex:1"></span>
+      <label class="hint" style="display:flex;gap:5px;align-items:center;cursor:pointer">
+        <input type="checkbox" id="dryRun"> dry run (show prompt only)
+      </label>
+    </div>
+    <div class="scroll" id="chat"></div>
+    <div style="padding:12px;border-top:1px solid var(--line);background:var(--panel)">
+      <div class="row">
+        <textarea id="ask" rows="2" placeholder="What does the evidence say about…?  (⌘/Ctrl+Enter to send)"></textarea>
+        <button class="primary" id="askBtn" style="align-self:stretch">Ask</button>
+      </div>
+      <div class="row" style="margin-top:8px;align-items:center">
+        <span class="hint" id="ctxInfo">0 sources in context</span>
+        <span class="spacer" style="flex:1"></span>
+        <select id="scope" style="width:auto;font-size:12px">
+          <option value="library">Use my library</option>
+          <option value="results">Use search results (top 8)</option>
+          <option value="both">Use both</option>
+        </select>
+      </div>
+    </div>
+  </section>
+</main>
+
+<dialog id="settings">
+  <div class="dlg">
+    <h2>BYOK settings</h2>
+    <div class="field">
+      <label>Provider</label>
+      <select id="provider">
+        <option value="openrouter">OpenRouter (one key → 400+ models)</option>
+        <option value="openai">OpenAI</option>
+        <option value="anthropic">Anthropic</option>
+        <option value="gemini">Google Gemini</option>
+        <option value="openai-compatible">Local / any OpenAI-compatible (Ollama, LM Studio, vLLM, DeepSeek, Groq…)</option>
+      </select>
+    </div>
+    <div class="field"><label>Model</label><input type="text" id="model" placeholder="e.g. anthropic/claude-sonnet-4.5"></div>
+    <div class="field"><label>Base URL</label><input type="text" id="baseUrl" placeholder="auto-filled from provider"></div>
+    <div class="field">
+      <label>API key</label><input type="password" id="apiKey" placeholder="stored in localStorage on this machine only">
+      <div class="hint">Never sent anywhere except your chosen provider. Use a scoped/limited key.</div>
+    </div>
+    <div class="field"><label>OpenAlex API key (optional — raises the free daily budget from $0.10 to $1)</label><input type="password" id="openalexKey"></div>
+    <div class="field"><label>Proxy URL for Semantic Scholar / arXiv (optional)</label><input type="text" id="proxy" placeholder="https://your-worker.workers.dev/?url=">
+      <div class="hint">Those two APIs don't send CORS headers, so a browser can't call them directly. Any tiny passthrough (`?url=` → fetch) unlocks them.</div>
+    </div>
+    <div class="field"><label>Semantic Scholar API key (optional, free)</label><input type="password" id="s2Key"></div>
+    <div class="field"><label>CORE API key (optional, free — raises rate limits)</label><input type="password" id="coreKey"></div>
+    <div class="row" style="justify-content:flex-end">
+      <button class="ghost" id="closeSettings">Cancel</button>
+      <button class="primary" id="saveSettings">Save</button>
+    </div>
+  </div>
+</dialog>
+
+<script>
+/* ============================ tiny helpers ============================ */
+const $ = s => document.querySelector(s);
+const el = (t, cls, txt) => { const n = document.createElement(t); if (cls) n.className = cls; if (txt != null) n.textContent = txt; return n; };
+const esc = s => (s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const yearNow = new Date().getFullYear();
+
+/* localStorage-backed settings */
+const DEFAULTS = {
+  provider: 'openrouter', model: '', baseUrl: '', apiKey: '',
+  openalexKey: '', proxy: '', s2Key: '', coreKey: ''
+};
+let S = Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem('ll.settings') || '{}'));
+const saveSettings = () => localStorage.setItem('ll.settings', JSON.stringify(S));
+let LIB = JSON.parse(localStorage.getItem('ll.library') || '[]');   // ingested papers
+let RESULTS = [];                                                   // current search hits
+
+const BASES = {
+  openrouter: 'https://openrouter.ai/api/v1',
+  openai: 'https://api.openai.com/v1',
+  anthropic: 'https://api.anthropic.com',
+  gemini: 'https://generativelanguage.googleapis.com',
+  'openai-compatible': 'http://localhost:11434/v1'
+};
+const DEFAULT_MODEL = {
+  openrouter: 'anthropic/claude-sonnet-4.5',
+  openai: 'gpt-4.1-mini',
+  anthropic: 'claude-sonnet-4-5',
+  gemini: 'gemini-2.5-flash',
+  'openai-compatible': 'llama3.1'
+};
+
+/* ============================ ranking ============================ */
+/* Deterministic, explainable ranking — no model call.
+   Weights are set from measurement (tests/rank-value.mjs), not intuition:
+   - lex:       lexical overlap with the query (title + abstract)
+   - cites:     log-scaled citation count — the best available quality proxy
+   - readable:  full-text link / open access, so the answer can actually quote it
+   Cross-source consensus was TRIALLED AND REJECTED: records returned by several
+   sources averaged 5-6 citations versus 70-217 for single-source records (the
+   multi-indexed ones are obscure), so it is displayed as information, not scored.
+   Recency is also not scored — landmark reading-science work does not expire. */
+const W = { lex: 1.0, cites: 0.30, readable: 0.45, oa: 0.15 };
+
+/* Length-stable lexical relevance. Reusing scorePage() here was a mistake: it divides
+   by sqrt(word count), so a 10-word title outscored a 1500-word abstract and the ranking
+   filled up with short titles that happened to repeat the query. These terms are all
+   bounded 0..1 so they compose predictably with the other signals. */
+function lexScore(r, qTerms) {
+  if (!qTerms.length) return 0;
+  const t = (r.title || '').toLowerCase(), a = (r.abstract || '').toLowerCase();
+  const titleHits = qTerms.filter(w => new RegExp('\\b' + w + '\\w*').test(t)).length / qTerms.length;
+  const absHits = a ? qTerms.filter(w => new RegExp('\\b' + w + '\\w*').test(a)).length / qTerms.length : 0;
+  const words = a.match(/[a-z][a-z\-]{2,}/g) || [];
+  let freq = 0;
+  for (const w of qTerms) { const stem = w.slice(0, Math.max(4, w.length - 2)); for (const x of words) if (x.startsWith(stem)) freq++; }
+  const density = Math.log1p(freq) / Math.log1p(Math.max(words.length, 1));   // 0..~1, length-stable
+  return 1.0 * titleHits + 0.6 * absHits + 0.5 * density;
+}
+
+function rankScore(r, qTerms) {
+  const lex = lexScore(r, qTerms);
+  const cites = Math.log10(1 + (r.citations || 0));
+  const readable = (r.pdf || r.fulltextUrl) ? 1 : 0;
+  const oa = r.oa ? 1 : 0;
+  const consensus = Math.max(0, ((r._also?.length || 1) - 1));   // shown, not scored
+  const score = W.lex * lex
+    + W.cites * Math.min(cites, 4) / 4
+    + W.readable * readable
+    + W.oa * oa;
+  return { score, lex, consensus, cites: r.citations || 0, readable, oa };
+}
+
+/** Sort search results best-first. Stable for equal scores (source order preserved). */
+function rankResults(query, records) {
+  const qTerms = terms(query);
+  return records
+    .map((r, i) => ({ r, i, s: rankScore(r, qTerms) }))
+    .sort((a, b) => b.s.score - a.s.score || a.i - b.i)
+    .map(x => ({ ...x.r, _rank: x.s }));
+}
+
+/* ============================ source adapters ============================ */
+/* Each returns records normalised to:
+   {id, title, authors[], year, venue, doi, url, pdf, abstract, citations, source, pages?} */
+
+function unInvert(inv) {                       // OpenAlex abstract_inverted_index -> text
+  if (!inv) return '';
+  const words = [];
+  for (const [w, positions] of Object.entries(inv)) for (const p of positions) words[p] = w;
+  return words.join(' ').trim();
+}
+const clean = s => (s || '')
+  .replace(/<[^>]+>/g, ' ')                    // strip JATS/HTML tags from Crossref abstracts
+  .replace(/\s+/g, ' ').trim();
+const normTitle = t => (t || '').toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 80);
+const doiOf = r => (r.doi || '').replace(/^https?:\/\/(dx\.)?doi\.org\//i, '').toLowerCase();
+
+async function jget(url) {
+  const r = await fetch(url, { headers: { Accept: 'application/json' } });
+  if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + url.slice(0, 90));
+  return r.json();
+}
+
+/* Several scholarly APIs return HTTP 200 with a well-formed error or an empty
+   container — a "silent gap" that reads as "nothing exists". Validate the SHAPE,
+   not just the status code, and fail loudly so the UI can say a source degraded
+   instead of showing zero results. */
+const SHAPES = {
+  openalex: d => { if (!Array.isArray(d?.results)) throw new Error('OpenAlex: ' + (d?.message || 'no results array')); },
+  crossref: d => { if (!d?.message || !Array.isArray(d.message.items)) throw new Error('Crossref: unexpected response shape'); },
+  europepmc: d => {
+    if (d?.errCode) throw new Error('Europe PMC: ' + (d.errMessage || d.errCode));
+    if (!Array.isArray(d?.resultList?.result)) throw new Error('Europe PMC: unexpected response shape (no resultList)');
+  },
+  pubmed: d => {
+    if (!d?.esearchresult) throw new Error('PubMed: unexpected response shape');
+    if (d.esearchresult.error) throw new Error('PubMed: ' + (d.esearchresult['error_list']?.[0]?.error || d.esearchresult.error));
+  },
+  eric: d => { if (!d?.response || !Array.isArray(d.response.docs)) throw new Error('ERIC: unexpected response shape'); },
+  doaj: d => { if (!Array.isArray(d?.results)) throw new Error('DOAJ: unexpected response shape'); },
+  core: d => { if (!Array.isArray(d?.results)) throw new Error('CORE: unexpected response shape'); }
+};
+function checkShape(name, d) { const f = SHAPES[name]; if (f) f(d); return d; }
+
+async function searchOpenAlex(q, {oaOnly, yearFrom, per = 25}) {
+  const f = [];
+  if (oaOnly) f.push('is_oa:true');
+  if (yearFrom) f.push('from_publication_date:' + yearFrom + '-01-01');
+  const u = new URL('https://api.openalex.org/works');
+  u.searchParams.set('search', q);
+  u.searchParams.set('per-page', per);
+  u.searchParams.set('sort', 'relevance_score:desc');
+  if (f.length) u.searchParams.set('filter', f.join(','));
+  if (S.openalexKey) u.searchParams.set('api_key', S.openalexKey);
+  const d = checkShape('openalex', await jget(u.toString()));
+  return (d.results || []).map(w => {
+    const oa = w.open_access || {};                    // NOTE: is_oa lives here, NOT at top level
+    return {
+      id: 'openalex:' + w.id.split('/').pop(),
+      title: w.display_name || w.title || '(untitled)',
+      authors: (w.authorships || []).map(a => a.author?.display_name).filter(Boolean),
+      year: w.publication_year,
+      venue: w.primary_location?.source?.display_name || '',
+      doi: doiOf(w),
+      url: w.doi || w.primary_location?.landing_page_url || w.id,
+      pdf: w.best_oa_location?.pdf_url || oa.oa_url || '',
+      abstract: unInvert(w.abstract_inverted_index),
+      citations: w.cited_by_count || 0,
+      source: 'OpenAlex',
+      oa: !!(oa.is_oa ?? w.is_oa),
+      oaStatus: oa.oa_status || '',
+      fulltextCached: !!w.has_content?.pdf || !!w.has_fulltext,
+      retracted: !!w.is_retracted
+    };
+  });
+}
+
+async function searchCrossref(q, {oaOnly, yearFrom, per = 20}) {
+  const u = new URL('https://api.crossref.org/works');
+  u.searchParams.set('query.bibliographic', q);
+  u.searchParams.set('rows', per);
+  if (yearFrom) u.searchParams.set('filter', 'from-pub-date:' + yearFrom + '-01-01');
+  u.searchParams.set('select', 'DOI,title,author,issued,container-title,abstract,is-referenced-by-count,URL,license');
+  const d = checkShape('crossref', await jget(u.toString()));
+  return (d.message?.items || []).map(w => {
+    const authors = (w.author || []).map(a => [a.given, a.family].filter(Boolean).join(' '));
+    return {
+      id: 'crossref:' + w.DOI,
+      title: clean((w.title || [])[0]) || '(untitled)',
+      authors, year: w.issued?.['date-parts']?.[0]?.[0],
+      venue: clean((w['container-title'] || [])[0]),
+      doi: (w.DOI || '').toLowerCase(), url: w.URL, pdf: '',
+      abstract: clean(w.abstract), citations: w['is-referenced-by-count'] || 0,
+      source: 'Crossref', oa: false
+    };
+  });
+}
+
+async function searchEPMC(q, {oaOnly, yearFrom, per = 20}) {
+  const u = new URL('https://www.ebi.ac.uk/europepmc/webservices/rest/search');
+  u.searchParams.set('query', q + (yearFrom ? ` AND (FIRST_PDATE:[${yearFrom}-01-01 TO 2100-01-01])` : ''));
+  u.searchParams.set('format', 'json');
+  u.searchParams.set('pageSize', per);
+  u.searchParams.set('resultType', 'core');
+  const d = checkShape('europepmc', await jget(u.toString()));
+  return (d.resultList?.result || [])
+    .filter(r => !oaOnly || r.isOpenAccess === 'Y')
+    .map(r => ({
+      id: 'epmc:' + (r.pmid || r.id),
+      title: clean(r.title) || '(untitled)',
+      authors: (r.authorString || '').split(',').map(s => s.trim()).filter(Boolean).slice(0, 20),
+      year: +(r.pubYear || 0) || null,
+      venue: r.journalInfo?.journal?.title || r.journalTitle || '',
+      doi: (r.doi || '').toLowerCase(),
+      url: r.doi ? 'https://doi.org/' + r.doi : (r.pmid ? 'https://pubmed.ncbi.nlm.nih.gov/' + r.pmid + '/' : ''),
+      pdf: r.isOpenAccess === 'Y' && r.pmcid ? `https://www.ebi.ac.uk/europepmc/webservices/rest/${r.pmcid}/fullTextXML` : '',
+      abstract: clean(r.abstractText), citations: +(r.citedByCount || 0),
+      source: 'Europe PMC', oa: r.isOpenAccess === 'Y'
+    }));
+}
+
+async function searchPubMed(q, {per = 20} = {}) {
+  const es = checkShape('pubmed', await jget(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&retmode=json&retmax=${per}&sort=relevance&term=${encodeURIComponent(q)}`));
+  const ids = es.esearchresult?.idlist || [];
+  if (!ids.length) return [];
+  const su = await jget(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&retmode=json&id=${ids.join(',')}`);
+  return ids.map(id => su.result?.[id]).filter(Boolean).map(r => ({
+    id: 'pubmed:' + r.uid,
+    title: clean(r.title) || '(untitled)',
+    authors: (r.authors || []).map(a => a.name),
+    year: +(r.pubdate || '').slice(0, 4) || null,
+    venue: r.fulljournalname || r.source || '',
+    doi: (r.articleids || []).find(x => x.idtype === 'doi')?.value?.toLowerCase() || '',
+    url: 'https://pubmed.ncbi.nlm.nih.gov/' + r.uid + '/',
+    pdf: '', abstract: '', citations: 0, source: 'PubMed', oa: false,
+    note: 'abstract not fetched (esummary)'
+  }));
+}
+
+/* --- ERIC: free, CORS-open, the education index. ED#### records usually serve a
+       PDF at files.eric.ed.gov/fulltext/<id>.pdf; EJ#### records link out by DOI. --- */
+async function searchERIC(q, {yearFrom, per = 20}) {
+  const u = new URL('https://api.ies.ed.gov/eric/');
+  u.searchParams.set('search', q);
+  u.searchParams.set('format', 'json');
+  u.searchParams.set('rows', per);
+  u.searchParams.set('fields', 'id,title,author,description,publicationdateyear,source,peerreviewed,publicationtype,url,issn');
+  const d = checkShape('eric', await jget(u.toString()));
+  return (d.response?.docs || []).map(r => {
+    const isDoc = String(r.id || '').startsWith('ED');           // ERIC document (often full text in ERIC)
+    const raw = r.url || '';
+    const m = raw.match(/doi\.org\/(.+)$/i);
+    return {
+      id: 'eric:' + r.id,
+      title: clean(r.title) || '(untitled)',
+      authors: r.author || [],
+      year: r.publicationdateyear || null,
+      venue: clean(r.source) || 'ERIC',
+      doi: m ? m[1].toLowerCase() : '',
+      // ED records have no DOI: point at the stable ERIC landing page instead of a raw publisher URL
+      url: m ? 'https://doi.org/' + m[1] : (raw || `https://eric.ed.gov/?id=${r.id}`),
+      pdf: isDoc ? `https://files.eric.ed.gov/fulltext/${r.id}.pdf` : '',   // present for many, not all, ED records
+      abstract: clean(r.description),
+      citations: 0,
+      source: 'ERIC',
+      oa: false,                       // ERIC does not assert OA status — link only
+      peerReviewed: r.peerreviewed === 'T',
+      types: r.publicationtype || []
+    };
+  });
+}
+
+/* --- DOAJ: free, CORS-open, gold open-access journals only → full text is free by definition.
+       DOAJ treats bare multi-word queries as AND (4 words → 2 hits), so widen to OR when thin. --- */
+async function searchDOAJ(q, {per = 20} = {}) {
+  const run = async query => {
+    const d = checkShape('doaj', await jget(`https://doaj.org/api/search/articles/${encodeURIComponent(query)}?pageSize=${per}`));
+    return d.results || [];
+  };
+  let results = await run(q);
+  let widened = false;
+  if (results.length < 3) {
+    const alt = terms(q).slice(0, 6).join(' OR ');
+    if (alt) {
+      widened = true;
+      const seen = new Set(results.map(r => r.id));
+      results = results.concat((await run(alt)).filter(r => !seen.has(r.id)));
+    }
+  }
+  return results.slice(0, per).map(r => {
+    const b = r.bibjson || {};
+    const doi = (b.identifier || []).find(i => i.type === 'doi')?.id || '';
+    const ft = (b.link || []).find(l => l.type === 'fulltext')?.url || '';
+    return {
+      id: 'doaj:' + r.id,
+      title: clean(b.title) || '(untitled)',
+      authors: (b.author || []).map(a => a.name).filter(Boolean),
+      year: +(b.year || 0) || null,
+      venue: clean(b.journal?.title) || 'DOAJ',
+      doi: doi.toLowerCase(),
+      url: doi ? 'https://doi.org/' + doi : ft,
+      pdf: /\.pdf($|\?)/i.test(ft) ? ft : '',
+      fulltextUrl: ft,
+      abstract: clean(b.abstract),
+      citations: 0,
+      source: 'DOAJ',
+      oa: true,                        // DOAJ only indexes open-access journals
+      queryWidened: widened,
+      keywords: b.keywords || []
+    };
+  });
+}
+
+/* --- CORE: 300M+ OA works from repositories worldwide, downloadUrl → free PDF.
+       CAVEAT (verified): keyless access rides a small shared anonymous quota that
+       exhausts fast — after a handful of probes CORE returns 429 with an
+       x-ratelimit-retry-after header, browser or not. Treat it as key-required. --- */
+async function searchCORE(q, {per = 20} = {}) {
+  const target = `https://api.core.ac.uk/v3/search/works/?q=${encodeURIComponent(q)}&limit=${per}`;
+  const opts = { headers: { Accept: 'application/json' } };
+  let url = target;
+  if (S.coreKey) opts.headers.Authorization = 'Bearer ' + S.coreKey;
+  else if (S.proxy) url = viaProxy(target);      // a keyless fallback hop, subject to the same quota
+  else throw new Error('CORE needs a free API key: its anonymous quota is small and returns 429 (verified). Add a key in Settings.');
+  const r = await fetch(url, opts);
+  if (!r.ok) {
+    const retry = r.headers.get('x-ratelimit-retry-after');
+    throw new Error('CORE HTTP ' + r.status + (retry ? ' (retry after ' + retry + ')' : '') +
+      (r.status === 401 || r.status === 429 ? ' — set a free CORE API key or a proxy URL in Settings' : ''));
+  }
+  const d = checkShape('core', await r.json());
+  return (d.results || []).map(w => ({
+    id: 'core:' + (w.id ?? w.doi ?? w.title),
+    title: clean(w.title) || '(untitled)',
+    authors: (w.authors || []).map(a => a.name).filter(Boolean),
+    year: w.yearPublished || null,
+    venue: clean(w.publisher || (w.journals || [])[0]?.title) || 'CORE',
+    doi: (w.doi || '').replace(/^https?:\/\/(dx\.)?doi\.org\//i, '').toLowerCase(),
+    url: w.doi ? 'https://doi.org/' + String(w.doi).replace(/^https?:\/\/(dx\.)?doi\.org\//i, '') : (w.links?.[0]?.url || ''),
+    pdf: w.downloadUrl || '',
+    abstract: clean(w.abstract),
+    citations: w.citationCount || 0,
+    source: 'CORE',
+    oa: true,                        // CORE aggregates open repositories
+    docType: w.documentType || ''
+  }));
+}
+
+/* These two need a CORS proxy (see Settings). */
+function viaProxy(target) {
+  if (!S.proxy) throw new Error('needs proxy URL in Settings');
+  return S.proxy.includes('{url}') ? S.proxy.replace('{url}', encodeURIComponent(target))
+    : S.proxy + encodeURIComponent(target);
+}
+
+async function searchS2(q, {oaOnly, yearFrom, per = 20} = {}) {
+  const u = new URL(viaProxy('https://api.semanticscholar.org/graph/v1/paper/search'));
+  u.searchParams.set('query', q);
+  u.searchParams.set('limit', per);
+  u.searchParams.set('fields', 'title,abstract,year,venue,authors,citationCount,externalIds,openAccessPdf,url');
+  if (yearFrom) u.searchParams.set('year', yearFrom + '-');
+  const opts = { headers: { Accept: 'application/json' } };
+  if (S.s2Key) opts.headers['x-api-key'] = S.s2Key;
+  const r = await fetch(u.toString(), opts);
+  if (!r.ok) throw new Error('Semantic Scholar HTTP ' + r.status + (r.status === 429 ? ' (anonymous pool is rate-limited — add a free key)' : ''));
+  const d = await r.json();
+  return (d.data || []).map(p => ({
+    id: 's2:' + p.paperId,
+    title: p.title || '(untitled)',
+    authors: (p.authors || []).map(a => a.name),
+    year: p.year, venue: p.venue || '',
+    doi: (p.externalIds?.DOI || '').toLowerCase(),
+    url: p.url || (p.externalIds?.DOI ? 'https://doi.org/' + p.externalIds.DOI : ''),
+    pdf: p.openAccessPdf?.url || '',
+    abstract: p.abstract || '', citations: p.citationCount || 0,
+    source: 'Semantic Scholar', oa: !!p.openAccessPdf
+  })).filter(r => !oaOnly || r.oa);
+}
+
+async function searchArxiv(q, {per = 20} = {}) {
+  const xml = await (await fetch(viaProxy(`https://export.arxiv.org/api/query?search_query=all:${encodeURIComponent('"'+q+'"')}&max_results=${per}&sortBy=relevance`))).text();
+  const doc = new DOMParser().parseFromString(xml, 'application/xml');
+  const entries = [...doc.querySelectorAll('entry')];
+  // arXiv answers a malformed request with HTTP 200 and a single entry titled "Error".
+  if (entries.length === 1 && /^Error/i.test(entries[0].querySelector('title')?.textContent || ''))
+    throw new Error('arXiv rejected the query: ' + (entries[0].querySelector('summary')?.textContent || '').trim().slice(0, 120));
+  return entries.map(e => {
+    const g = t => e.querySelector(t)?.textContent?.trim() || '';
+    return {
+      id: 'arxiv:' + g('id'),
+      title: clean(g('title')),
+      authors: [...e.querySelectorAll('author > name')].map(n => n.textContent.trim()),
+      year: +(g('published') || '').slice(0, 4) || null,
+      venue: 'arXiv', doi: g('doi') || '',
+      url: g('id'), pdf: (e.querySelector('link[title="pdf"]')?.getAttribute('href')) || '',
+      abstract: clean(g('summary')), citations: 0, source: 'arXiv', oa: true
+    };
+  });
+}
+
+/* Merging many sources widens discovery but DILUTES metadata: Crossref/PubMed/ERIC/DOAJ
+   records carry no OA status or PDF link, so a raw 9-source union scores far worse on
+   "can I actually read this?" than OpenAlex alone (measured: 43% OA in the union vs 95%
+   for OpenAlex). One batched DOI lookup through OpenAlex (50 DOIs per call, ~$0.0001 each)
+   restores OA status, best PDF, citation count, year and journal for every matched record,
+   and the abstract for the ~55% of works OpenAlex holds one for (180M of 327M). */
+async function enrichWithOpenAlex(records) {
+  const dois = [...new Set(records.map(r => doiOf(r)).filter(d => /^10\./.test(d)))].slice(0, 300);
+  if (!dois.length) return records;
+  const map = new Map();
+  for (let i = 0; i < dois.length; i += 50) {
+    const u = new URL('https://api.openalex.org/works');
+    u.searchParams.set('filter', 'doi:' + dois.slice(i, i + 50).join('|'));
+    u.searchParams.set('per-page', '50');
+    u.searchParams.set('select', 'doi,open_access,best_oa_location,cited_by_count,abstract_inverted_index,publication_year,primary_location,display_name');
+    if (S.openalexKey) u.searchParams.set('api_key', S.openalexKey);
+    try {
+      const d = checkShape('openalex', await jget(u.toString()));
+      for (const w of d.results || []) map.set(doiOf(w), w);
+    } catch { /* enrichment is best-effort: never fail a search because of it */ }
+  }
+  let n = 0;
+  const out = records.map(r => {
+    const w = map.get(doiOf(r));
+    if (!w) return r;
+    n++;
+    const oa = w.open_access || {};
+    return {
+      ...r,
+      oa: r.oa || !!oa.is_oa,
+      oaStatus: r.oaStatus || oa.oa_status || '',
+      pdf: r.pdf || w.best_oa_location?.pdf_url || oa.oa_url || '',
+      citations: r.citations || w.cited_by_count || 0,
+      abstract: (r.abstract || '').length > 100 ? r.abstract : (unInvert(w.abstract_inverted_index) || r.abstract),
+      year: r.year || w.publication_year || null,
+      venue: r.venue || w.primary_location?.source?.display_name || '',
+      enriched: true
+    };
+  });
+  out.enrichedCount = n;
+  return out;
+}
+
+/* ============================ search orchestration ============================ */
+const SOURCES = {
+  openalex: { box: '#src-openalex', fn: searchOpenAlex },
+  crossref: { box: '#src-crossref', fn: searchCrossref },
+  epmc:     { box: '#src-epmc',     fn: searchEPMC },
+  eric:     { box: '#src-eric',     fn: searchERIC },
+  doaj:     { box: '#src-doaj',     fn: searchDOAJ },
+  core:     { box: '#src-core',     fn: searchCORE },
+  pubmed:   { box: '#src-pubmed',   fn: searchPubMed },
+  s2:       { box: '#src-s2',       fn: searchS2 },
+  arxiv:    { box: '#src-arxiv',    fn: searchArxiv }
+};
+
+function dedupe(records) {
+  const byDoi = new Map(), byTitle = new Map(), out = [];
+  for (const r of records) {
+    const d = doiOf(r), t = normTitle(r.title);
+    const hit = (d && byDoi.get(d)) || (t && byTitle.get(t));
+    if (hit) {                                   // merge: keep the richer record
+      hit._also = hit._also || []; hit._also.push(r.source);
+      if ((r.abstract || '').length > (hit.abstract || '').length) hit.abstract = r.abstract;
+      if (!hit.pdf && r.pdf) hit.pdf = r.pdf;
+      if (!hit.doi && r.doi) hit.doi = r.doi;
+      continue;
+    }
+    r._also = [r.source];
+    out.push(r);
+    if (d) byDoi.set(d, r);
+    if (t) byTitle.set(t, r);
+  }
+  return out;
+}
+
+async function runSearch() {
+  const q = $('#q').value.trim();
+  if (!q) return;
+  const opts = { oaOnly: $('#oaOnly').checked, yearFrom: $('#yearFrom').value.trim() };
+  const picked = Object.entries(SOURCES).filter(([, s]) => $(s.box).checked);
+  $('#searchStatus').innerHTML = '<span class="spin"></span>querying ' + picked.length + ' source(s)…';
+  const settled = await Promise.allSettled(picked.map(([, s]) => s.fn(q, opts)));
+  const errs = [], all = [];
+  settled.forEach((res, i) => {
+    if (res.status === 'fulfilled') all.push(...res.value);
+    else errs.push(picked[i][0] + ': ' + res.reason.message);
+  });
+  RESULTS = rankResults(q, await enrichWithOpenAlex(dedupe(all).filter(r => r.title && r.title !== '(untitled)')));
+  renderResults();
+  $('#searchStatus').textContent = `${RESULTS.length} unique papers` +
+    (RESULTS.enrichedCount ? ` · ${RESULTS.enrichedCount} metadata-enriched` : '') +
+    (errs.length ? ` · ${errs.length} source error(s)` : '');
+  if (errs.length) $('#results').prepend(el('div', 'empty', '⚠ ' + errs.join(' | ')));
+}
+
+/* ============================ rendering: results + library ============================ */
+function authorLine(a) {
+  if (!a?.length) return '';
+  return a.length > 2 ? `${a[0]} et al.` : a.join(' & ');
+}
+function renderResults() {
+  const box = $('#results'); box.innerHTML = '';
+  if (!RESULTS.length) { box.append(el('div', 'empty', 'No hits. Try another query or enable more sources.')); return; }
+  for (const r of RESULTS) {
+    const c = el('div', 'card');
+    const top = el('div', 'toprow');
+    top.append(el('span', 'pill', r.source + (r._also?.length > 1 ? ' +' + (r._also.length - 1) : '')));
+    if (r.oa) top.append(el('span', 'pill oa', 'open access' + (r.oaStatus ? ' · ' + r.oaStatus : '')));
+    else if (r.pdf) top.append(el('span', 'pill', r.source === 'ERIC' ? 'ERIC full text' : 'full-text link'));
+    if (r.citations) top.append(el('span', 'pill', r.citations + ' cited'));
+    if (r._also?.length > 1) top.append(el('span', 'pill', r._also.length + ' sources'));
+    if (r._rank) {
+      const p = el('span', 'pill', 'rank ' + r._rank.score.toFixed(2));
+      p.title = `lexical ${r._rank.lex.toFixed(2)} · consensus ${r._rank.consensus} · ${r._rank.cites} cited · ${r._rank.readable ? 'full text available' : 'no full-text link'}`;
+      top.append(p);
+    }
+    // links live in the header row so every card's action row wraps identically
+    const links = el('div', 'links');
+    if (r.url) { const a = el('a', 'tiny', 'source ↗'); a.href = r.url; a.target = '_blank'; links.append(a); }
+    if (r.pdf) { const a = el('a', 'tiny', 'pdf ↗'); a.href = r.pdf; a.target = '_blank'; links.append(a); }
+    top.append(links);
+    c.append(top);
+    c.append(el('h3', null, r.title));
+    const m = el('div', 'meta');
+    m.innerHTML = `${esc(authorLine(r.authors))}${r.year ? ' · ' + r.year : ''}${r.venue ? ' · ' + esc(r.venue) : ''}`;
+    c.append(m);
+    if (r.abstract) c.append(el('div', 'abs', r.abstract));
+    else c.append(el('div', 'abs hint', '(no abstract in metadata — ingest the PDF to analyse full text)'));
+    const acts = el('div', 'acts');
+    if (r.fulltextCached) acts.append(el('span', 'pill oa', 'full text cached'));
+    if (r.peerReviewed) acts.append(el('span', 'pill', 'peer reviewed'));
+    if (r.retracted) acts.append(el('span', 'pill', '⚠ retracted'));
+    if (r.doi) acts.append(el('span', 'pill', 'doi:' + r.doi));
+    acts.append(el('span', 'spacer'));
+    const add = el('button', 'tiny', '+ Add');
+    add.onclick = () => { ingestRecord(r); add.textContent = '✓ added'; add.disabled = true; };
+    acts.append(add);
+    c.append(acts);
+    box.append(c);
+  }
+}
+
+function ingestRecord(r) {
+  if (LIB.some(x => x.id === r.id)) return;
+  LIB.push({ ...r, kind: r.kind || 'metadata', added: Date.now() });
+  persistLib(); renderLibrary();
+}
+function persistLib() {
+  try { localStorage.setItem('ll.library', JSON.stringify(LIB)); }
+  catch (e) { alert('Library too large for localStorage once full texts are added. Export and trim, or run this from a small local server with IndexedDB.'); }
+  $('#libCount').textContent = '(' + LIB.length + ')';
+  renderCtxInfo();
+}
+function renderLibrary() {
+  const box = $('#libList'); box.innerHTML = '';
+  if (!LIB.length) { box.append(el('div', 'empty', 'Empty. Add papers from search results, or drop in your own PDFs.')); }
+  LIB.forEach((r, i) => {
+    const d = el('div', 'libitem');
+    const t = el('div', 't');
+    t.innerHTML = `<b>${esc(r.title)}</b><div class="hint">${esc(authorLine(r.authors))}${r.year ? ' · ' + r.year : ''} · ${r.kind === 'fulltext' ? (r.pages?.length + ' pages parsed') : (r.abstract ? 'abstract' : 'metadata only')} · ${esc(r.source || 'file')}</div>`;
+    d.append(t);
+    const rm = el('button', 'tiny ghost', '✕');
+    rm.onclick = () => { LIB.splice(i, 1); persistLib(); renderLibrary(); };
+    d.append(rm);
+    box.append(d);
+  });
+  $('#libCount').textContent = '(' + LIB.length + ')';
+}
+
+/* ============================ PDF / text ingestion ============================ */
+async function parsePdf(file) {
+  const buf = await file.arrayBuffer();
+  const pdfjs = await import('https://cdn.jsdelivr.net/npm/pdfjs-dist@4.6.82/build/pdf.min.mjs');
+  pdfjs.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.6.82/build/pdf.worker.min.mjs';
+  const doc = await pdfjs.getDocument({ data: buf }).promise;
+  const pages = [];
+  for (let p = 1; p <= doc.numPages; p++) {
+    const tc = await (await doc.getPage(p)).getTextContent();
+    pages.push(tc.items.map(i => i.str).join(' ').replace(/\s+/g, ' ').trim());
+  }
+  return { pages, numPages: doc.numPages };
+}
+
+async function addFiles(files) {
+  for (const f of files) {
+    try {
+      if (/\.pdf$/i.test(f.name)) {
+        const { pages } = await parsePdf(f);
+        LIB.push({
+          id: 'file:' + f.name + ':' + f.size, title: f.name.replace(/\.pdf$/i, ''),
+          authors: [], year: null, venue: '', doi: '', url: '', pdf: '', abstract: '',
+          citations: 0, source: 'upload', kind: 'fulltext', pages, added: Date.now()
+        });
+      } else {
+        const text = await f.text();
+        LIB.push({
+          id: 'file:' + f.name + ':' + f.size, title: f.name.replace(/\.[^.]+$/, ''),
+          authors: [], year: null, venue: '', doi: '', url: '', pdf: '', abstract: '',
+          citations: 0, source: 'upload', kind: 'fulltext', pages: [text.replace(/\s+/g, ' ').trim()], added: Date.now()
+        });
+      }
+      // auto-fill metadata from OpenAlex by title
+      const r = LIB[LIB.length - 1];
+      const hit = await searchOpenAlex(r.title, { per: 3 }).catch(() => []);
+      const best = hit.find(h => normTitle(h.title).includes(normTitle(r.title).slice(0, 40)));
+      if (best) Object.assign(r, { authors: best.authors, year: best.year, venue: best.venue, doi: best.doi, url: best.url, citations: best.citations, _metaFrom: 'OpenAlex' });
+    } catch (e) { alert('Could not read ' + f.name + ': ' + e.message); }
+  }
+  persistLib(); renderLibrary();
+}
+
+/* ============================ retrieval (deterministic, no embeddings) ============================ */
+const STOP = new Set('a an the of and or for to in on with is are was were be been this that these those as by from at it its we our their there here what which who how why does do did can could should would may might must not no into over under between using used use study studies results result method methods approach paper we'.split(' '));
+const terms = s => (s || '').toLowerCase().match(/[a-z][a-z\-]{2,}/g)?.filter(w => !STOP.has(w)) || [];
+
+function scorePage(text, qTerms) {
+  if (!text) return 0;
+  const words = terms(text);
+  const tf = new Map();
+  for (const w of words) tf.set(w, (tf.get(w) || 0) + 1);
+  let s = 0;
+  for (const t of qTerms) {
+    const c = tf.get(t) || 0;
+    if (c) s += 1 + Math.log(c);
+    if (new RegExp('\\b' + t + '\\w*', 'i').test(text)) s += 0.3;
+  }
+  return s / Math.sqrt(words.length || 1);
+}
+
+/** Build numbered context blocks the LLM must cite as [n]. */
+function buildContext(question, mode, limit = 8) {
+  const qTerms = terms(question);
+  let pool;
+  if (mode === 'library') pool = LIB.slice();
+  else if (mode === 'results') pool = RESULTS.slice(0, limit);
+  else pool = LIB.concat(RESULTS.slice(0, limit));
+  const scored = [];
+  for (const r of pool) {
+    if (r.kind === 'fulltext' && r.pages?.length) {
+      const ranked = r.pages.map((p, i) => ({ i, s: scorePage(p, qTerms) })).sort((a, b) => b.s - a.s).slice(0, 3)
+        .map(x => ({ ...x, text: r.pages[x.i] }));
+      if (ranked[0]?.s > 0) scored.push({ r, s: ranked[0].s, body: ranked.map(x => `[p.${x.i + 1}] ${x.text.slice(0, 2600)}`).join('\n\n') });
+    } else if (r.abstract) {
+      scored.push({ r, s: rankScore(r, qTerms).score, body: r.abstract.slice(0, 2600) });
+    }
+  }
+  scored.sort((a, b) => b.s - a.s);
+  const chosen = scored.slice(0, limit);
+  const blocks = chosen.map((c, i) => `[${i + 1}] ${c.r.title}\n${authorLine(c.r.authors)}${c.r.year ? ' (' + c.r.year + ')' : ''}${c.r.venue ? '. ' + c.r.venue : ''}${c.r.doi ? '. doi:' + c.r.doi : ''}\nSOURCE: ${c.r.source}${c.r.kind === 'fulltext' ? ' (full text, page markers)' : ' (abstract)'}\n---\n${c.body}\n---`).join('\n\n');
+  return { blocks, sources: chosen.map(c => c.r) };
+}
+
+const SYSTEM = `You are a rigorous research assistant. Answer ONLY from the numbered SOURCE blocks provided.
+Rules:
+- Cite every factual claim with inline bracketed numbers matching the source blocks, e.g. [1] or [2][3]. Never cite a number that is not provided.
+- If the sources disagree, say so explicitly and cite both sides.
+- If the sources do not answer the question, say "the provided sources do not answer this" — do not fill the gap from memory.
+- Where a page marker like [p.4] is present in a source, cite the page inline, e.g. [1, p.4].
+- Be concise: a short direct answer, then bullet evidence, then an "Uncertainty / gaps" line.
+- Never invent references, DOIs, numbers or quotations.`;
+
+/* ============================ BYOK LLM adapters (all browser-direct) ============================ */
+function providerConfig() {
+  const provider = S.provider;
+  const baseUrl = (S.baseUrl || BASES[provider] || '').replace(/\/+$/, '');
+  const model = S.model || DEFAULT_MODEL[provider];
+  return { provider, baseUrl, model };
+}
+
+async function callLLM(system, user, onDelta) {
+  const { provider, baseUrl, model } = providerConfig();
+  if (!model) throw new Error('No model set — open Settings.');
+  if (provider !== 'openai-compatible' && !S.apiKey) throw new Error('No API key set — open Settings.');
+
+  if (provider === 'anthropic') {
+    const r = await fetch(baseUrl + '/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': S.apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({ model, max_tokens: 2048, system, messages: [{ role: 'user', content: user }], stream: true })
+    });
+    if (!r.ok) throw new Error('Anthropic ' + r.status + ': ' + (await r.text()).slice(0, 300));
+    return readSSE(r, j => j.type === 'content_block_delta' ? j.delta?.text : null, onDelta);
+  }
+
+  if (provider === 'gemini') {
+    const url = `${baseUrl}/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(S.apiKey)}`;
+    const r = await fetch(url, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: system }] },
+        contents: [{ role: 'user', parts: [{ text: user }] }],
+        generationConfig: { temperature: 0.2, maxOutputTokens: 2048 }
+      })
+    });
+    if (!r.ok) throw new Error('Gemini ' + r.status + ': ' + (await r.text()).slice(0, 300));
+    return readSSE(r, j => j.candidates?.[0]?.content?.parts?.map(p => p.text).join('') || null, onDelta);
+  }
+
+  // OpenAI + OpenRouter + any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, DeepSeek, Groq, Nous Portal…)
+  const headers = { 'content-type': 'application/json' };
+  if (S.apiKey) headers.authorization = 'Bearer ' + S.apiKey;
+  if (provider === 'openrouter') { headers['HTTP-Referer'] = location.origin; headers['X-Title'] = 'CiteKit'; }
+  const r = await fetch(baseUrl + '/chat/completions', {
+    method: 'POST', headers,
+    body: JSON.stringify({ model, temperature: 0.2, max_tokens: 2048, stream: true, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] })
+  });
+  if (!r.ok) throw new Error(provider + ' ' + r.status + ': ' + (await r.text()).slice(0, 300));
+  return readSSE(r, j => j.choices?.[0]?.delta?.content || null, onDelta);
+}
+
+async function readSSE(resp, pick, onDelta) {
+  const reader = resp.body.getReader(), dec = new TextDecoder();
+  let buf = '', full = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const lines = buf.split('\n'); buf = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === '[DONE]') continue;
+      try {
+        const t = pick(JSON.parse(payload));
+        if (t) { full += t; onDelta(t, full); }
+      } catch { /* keep-alive or partial frame */ }
+    }
+  }
+  return full;
+}
+
+/* ============================ chat UI ============================ */
+function renderCtxInfo() {
+  $('#ctxInfo').textContent = LIB.length + ' in library · ' + RESULTS.length + ' search results';
+}
+function addMsg(who, html, cls) {
+  const empty = document.getElementById('chatEmpty');
+  if (empty) empty.remove();
+  const m = el('div', 'msg ' + (cls || ''));
+  m.append(el('div', 'who', who));
+  const body = el('div', 'md');
+  if (html) body.innerHTML = html;
+  m.append(body);
+  $('#chat').append(m);
+  $('#chat').scrollTop = $('#chat').scrollHeight;
+  return body;
+}
+function mdToHtml(md) {
+  let h = esc(md);
+  h = h.replace(/^###\s+(.*)$/gm, '<h3>$1</h3>').replace(/^##\s+(.*)$/gm, '<h2>$1</h2>')
+       .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+       .replace(/`([^`]+)`/g, '<code>$1</code>')
+       .replace(/^\s*[-*]\s+(.*)$/gm, '<li>$1</li>');
+  h = h.replace(/(<li>[\s\S]*?<\/li>)(?!\s*<li>)/g, '<ul>$1</ul>');
+  h = h.split(/\n{2,}/).map(p => /^<(h2|h3|ul)/.test(p.trim()) ? p : '<p>' + p.replace(/\n/g, '<br>') + '</p>').join('\n');
+  return h.replace(/\[(\d+(?:\s*,\s*p\.\d+)?)\](?!\()/g, (m, n) => `<sup class="cite" data-n="${String(n).match(/\d+/)[0]}">[${n}]</sup>`);
+}
+
+async function ask() {
+  const q = $('#ask').value.trim();
+  if (!q) return;
+  const mode = $('#scope').value;
+  const { blocks, sources } = buildContext(q, mode);
+  addMsg('you', '<p>' + esc(q) + '</p>', 'user');
+  $('#ask').value = '';
+  if (!blocks) {
+    addMsg('assistant', '<p class="hint">Nothing in scope. Search and add papers, or drop PDFs into the Library tab.</p>');
+    return;
+  }
+  const user = `QUESTION: ${q}\n\nSOURCES:\n\n${blocks}\n\nAnswer with inline [n] citations.`;
+  const srcTable = '<table class="src"><tr><th>#</th><th>Source</th><th>Citations</th></tr>' +
+    sources.map((s, i) => `<tr><td>[${i + 1}]</td><td>${esc(s.title)}<br><span class="hint">${esc(authorLine(s.authors))}${s.year ? ' · ' + s.year : ''}${s.venue ? ' · ' + esc(s.venue) : ''}${s.doi ? ' · doi:' + esc(s.doi) : ''}${s.url ? ` · <a href="${esc(s.url)}" target="_blank">source ↗</a>` : ''}</span></td><td>${s.citations || 0}</td></tr>`).join('') + '</table>';
+
+  if ($('#dryRun').checked) {
+    const body = addMsg('assistant · dry run', `<p class="hint">No API call made. This is exactly what would be sent to <b>${esc(providerConfig().provider)}/${esc(providerConfig().model || 'unset')}</b>.</p><details class="copy" open><summary>request preview (${blocks.length} chars of context)</summary><pre>${esc('SYSTEM:\n' + SYSTEM + '\n\n' + user)}</pre></details>` + srcTable);
+    return;
+  }
+
+  const body = addMsg('assistant', '<span class="spin"></span>thinking…');
+  let full = '';
+  try {
+    await callLLM(SYSTEM, user, (delta, acc) => { full = acc; body.innerHTML = mdToHtml(full) + '<span class="spin"></span>'; });
+    body.innerHTML = mdToHtml(full);
+    body.insertAdjacentHTML('beforeend', srcTable);
+    wireCitations(body);
+  } catch (e) {
+    body.innerHTML = `<p style="color:#ff8080">⚠ ${esc(e.message)}</p><p class="hint">Check Settings → provider, model (use the exact API model id), base URL and key. Local endpoints (Ollama/LM Studio) must allow CORS from this page's origin.</p>`;
+  }
+}
+let _lastFull = '';
+function wireCitations(root) {
+  root.querySelectorAll('sup.cite').forEach(s => s.onclick = () => {
+    const t = root.querySelectorAll('table.src tr')[+s.dataset.n];
+    if (t) { t.scrollIntoView({ block: 'center' }); t.style.background = '#1d3a2c'; setTimeout(() => t.style.background = '', 900); }
+  });
+}
+
+/* ============================ citations export ============================ */
+const cite = {
+  apa(r) {
+    const a = r.authors?.length ? r.authors.map(n => { const p = n.split(' '); const last = p.pop(); return `${last}, ${p.map(x => x[0] + '.').join(' ')}`; }).join(', ') : 'Unknown';
+    const d = a + (r.year ? ` (${r.year}).` : '.');
+    return `${d} ${r.title}. ${r.venue || ''}${r.doi ? ' https://doi.org/' + r.doi : (r.url ? ' ' + r.url : '')}`.replace(/\s+/g, ' ').trim();
+  },
+  chicago(r) {
+    const a = r.authors?.length ? r.authors.map(n => { const p = n.split(' '); const last = p.pop(); return `${last}, ${p.join(' ')}`; }).join(', ') : 'Unknown';
+    return `${a}. ${r.year || 'n.d.'}. “${r.title}.” ${r.venue || ''}${r.doi ? '. https://doi.org/' + r.doi : ''}.`;
+  },
+  mla(r) {
+    const a = r.authors?.length ? (r.authors.length > 2 ? `${r.authors[0].split(' ').pop()}, et al` : r.authors.map(n => { const p = n.split(' '); const l = p.pop(); return `${l}, ${p.join(' ')}`; }).join(' and ')) : 'Unknown';
+    return `${a}. “${r.title}.” ${r.venue || ''}${r.year ? ', ' + r.year : ''}${r.doi ? ', doi:' + r.doi : ''}.`;
+  },
+  harvard(r) { return cite.apa(r); },
+  bibtex(r) {
+    const key = ((r.authors?.[0]?.split(' ').pop() || 'anon') + (r.year || 'n.d') + (r.title || '').split(/\s+/)[0]).replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+    return `@article{${key},\n  title   = {${r.title}},\n  author  = {${(r.authors || []).join(' and ')}},\n  journal = {${r.venue || ''}},\n  year    = {${r.year || ''}},\n  doi     = {${r.doi || ''}},\n  url     = {${r.url || ''}}\n}`;
+  },
+  ris(r) {
+    return ['TY  - JOUR', `TI  - ${r.title}`, ...(r.authors || []).map(a => `AU  - ${a}`), `PY  - ${r.year || ''}`, `JO  - ${r.venue || ''}`, r.doi ? `DO  - ${r.doi}` : '', r.url ? `UR  - ${r.url}` : '', 'ER  - '].filter(Boolean).join('\n');
+  },
+  csljson(r) {
+    return JSON.stringify({
+      type: 'article-journal', id: r.doi || r.id, title: r.title,
+      author: (r.authors || []).map(n => { const p = n.split(' '); return { family: p.pop(), given: p.join(' ') }; }),
+      issued: r.year ? { 'date-parts': [[r.year]] } : undefined,
+      'container-title': r.venue || undefined, DOI: r.doi || undefined, URL: r.url || undefined
+    }, null, 2);
+  }
+};
+
+function download(name, text, mime = 'text/plain') {
+  const a = el('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: mime }));
+  a.download = name; a.click(); URL.revokeObjectURL(a.href);
+}
+function exportLibrary() {
+  if (!LIB.length) return alert('Library is empty.');
+  download('library.bib', LIB.map(cite.bibtex).join('\n\n'));
+  download('library.ris', LIB.map(cite.ris).join('\n\n'));
+  download('library.csl.json', JSON.stringify(LIB.map(r => JSON.parse(cite.csljson(r))), null, 2), 'application/json');
+  download('library.apa.txt', LIB.map(r => cite.apa(r)).join('\n\n'));
+}
+
+/* ============================ wiring ============================ */
+$('#searchBtn').onclick = runSearch;
+$('#q').addEventListener('keydown', e => { if (e.key === 'Enter') runSearch(); });
+$('#askBtn').onclick = ask;
+$('#ask').addEventListener('keydown', e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) ask(); });
+$('#exportBtn').onclick = exportLibrary;
+$('#clearLib').onclick = () => { if (confirm('Clear the library?')) { LIB = []; persistLib(); renderLibrary(); } };
+$('#uploadBtn').onclick = () => $('#file').click();
+$('#file').onchange = e => { addFiles([...e.target.files]); e.target.value = ''; };
+$('#pasteBtn').onclick = () => {
+  const t = prompt('Paste the text of the paper (title on the first line):'); if (!t) return;
+  const lines = t.split('\n');
+  LIB.push({ id: 'paste:' + Date.now(), title: lines[0].slice(0, 120) || 'Pasted text', authors: [], year: null, venue: '', doi: '', url: '', pdf: '', abstract: '', citations: 0, source: 'pasted', kind: 'fulltext', pages: [lines.slice(1).join(' ')], added: Date.now() });
+  persistLib(); renderLibrary();
+};
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('on', x === t));
+  $('#tab-search').style.display = t.dataset.tab === 'search' ? 'flex' : 'none';
+  $('#tab-library').style.display = t.dataset.tab === 'library' ? 'flex' : 'none';
+});
+// settings dialog
+$('#settingsBtn').onclick = () => {
+  for (const k of ['provider', 'model', 'baseUrl', 'apiKey', 'openalexKey', 'proxy', 's2Key', 'coreKey']) $('#' + k).value = S[k] || '';
+  $('#settings').showModal();
+};
+$('#closeSettings').onclick = () => $('#settings').close();
+$('#saveSettings').onclick = () => {
+  for (const k of ['provider', 'model', 'baseUrl', 'apiKey', 'openalexKey', 'proxy', 's2Key', 'coreKey']) S[k] = $('#' + k).value.trim();
+  saveSettings(); refreshBadge(); $('#settings').close();
+};
+$('#provider').onchange = () => {          // auto-fill base URL + model when blank
+  const p = $('#provider').value;
+  if (!$('#baseUrl').value || Object.values(BASES).includes($('#baseUrl').value)) $('#baseUrl').value = BASES[p] || '';
+  if (!$('#model').value || Object.values(DEFAULT_MODEL).includes($('#model').value)) $('#model').value = DEFAULT_MODEL[p] || '';
+};
+function refreshBadge() {
+  const { provider, model } = providerConfig();
+  $('#keyBadge').textContent = S.apiKey || provider === 'openai-compatible' ? `${provider} · ${model || 'no model'}` : 'no key';
+  $('#keyBadge').style.color = (S.apiKey || provider === 'openai-compatible') ? 'var(--accent2)' : '';
+}
+// drag & drop PDFs anywhere
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', e => { e.preventDefault(); if (e.dataTransfer?.files?.length) addFiles([...e.dataTransfer.files]); });
+// boot
+$('#baseUrl').value = BASES[S.provider]; $('#model').value = S.model || '';
+refreshBadge(); renderLibrary(); renderResults(); renderCtxInfo();
+// empty state, so the assistant pane doesn't read as broken before first use
+{
+  const chat = $('#chat');
+  const e = el('div', 'msg');
+  e.id = 'chatEmpty';
+  e.innerHTML = `<div class="who">how this works</div>
+    <p class="hint" style="margin:.2em 0">Answers are built only from the sources you give it, with numbered citations you can click through.</p>
+    <ol class="hint" style="margin:.5em 0 .4em 1.2em;padding:0;line-height:1.7">
+      <li>Search on the left — ERIC is the education index, worth ticking for reading research.</li>
+      <li>Tick <b>+ Add</b> on the papers that matter, or drop your own PDFs into <b>Library</b>.</li>
+      <li>Ask below. Every claim comes back as <code>[1]</code>, <code>[2, p.4]</code> — click to jump to the source.</li>
+      <li>Tick <b>dry run</b> first if you want to see the exact prompt before spending tokens.</li>
+    </ol>`;
+  chat.append(e);
+}
+window.LL = { runSearch, buildContext, cite, callLLM, S, LIB: () => LIB, RESULTS: () => RESULTS, ask, mdToHtml,
+              addFiles, ingestRecord, searchOpenAlex, searchCrossref, searchEPMC, searchPubMed, searchS2, searchArxiv,
+              searchERIC, searchDOAJ, searchCORE, dedupe, checkShape, enrichWithOpenAlex, rankScore, rankResults };
+</script>
+</body>
+</html>
