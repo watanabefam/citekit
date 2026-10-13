@@ -157,6 +157,32 @@ How relevant is this document to the search query? Reply with exactly one digit:
   return m ? +m[0] : null;
 }
 
+/* Fixed-depth pooling: the top k from every run. Simple, and the default in TREC.
+ * Move-to-front pooling (Cormack & Buettcher): walk the runs round-robin, each contributing
+ * its highest-ranked document not already pooled. Measured to have similar statistical power
+ * with LOWER bias than fixed depth for the same adjudication effort, which is why it is here. */
+function depthPool(rankedLists, k) {
+  const pool = new Map();
+  for (const list of rankedLists) list.slice(0, k).forEach(d => pool.set(d.id, d));
+  return pool;
+}
+function mtfPool(rankedLists, n) {
+  const pool = new Map();
+  const idx = rankedLists.map(() => 0);
+  let progressed = true;
+  while (pool.size < n && progressed) {
+    progressed = false;
+    for (let s = 0; s < rankedLists.length && pool.size < n; s++) {
+      const list = rankedLists[s];
+      while (idx[s] < list.length) {
+        const doc = list[idx[s]++];
+        if (!pool.has(doc.id)) { pool.set(doc.id, doc); progressed = true; break; }
+      }
+    }
+  }
+  return pool;
+}
+
 const gain = rel => Math.pow(2, rel) - 1;
 function ndcg(ranked, judgments, k) {
   const dcg = arr => arr.slice(0, k).reduce((a, r, i) => a + gain(judgments.get(r.id) ?? 0) / Math.log2(i + 2), 0);
@@ -192,7 +218,10 @@ function bpref(ranked, judgments, minRel = 2) {
 }
 
 /* ---------- run ---------- */
-const K = 8;
+const K = 8;                                              // metric cutoff: nDCG@8, P@8
+const POOL_DEPTH = Math.max(1, parseInt(flag('--pool-depth') || '8', 10));   // how many to JUDGE
+const POOL_STRATEGY = flag('--pool-strategy') || 'depth';  // 'depth' | 'mtf'
+if (!['depth', 'mtf'].includes(POOL_STRATEGY)) { console.error('--pool-strategy must be depth|mtf'); process.exit(1); }
 const rows = [];
 const allJudgments = {};
 for (const spec of QUERIES) {
@@ -204,11 +233,11 @@ for (const spec of QUERIES) {
   let pool = LL.dedupe(raw).filter(r => r.title && r.title !== '(untitled)');
   pool = await LL.enrichWithOpenAlex(pool).catch(() => pool);
 
-  // depth-k pool across all variants -> judge the union
-  const pooled = new Map();
-  for (const [name, fn] of Object.entries(VARIANTS)) {
-    [...pool].sort((a, b) => fn(b, qT) - fn(a, qT)).slice(0, K).forEach(r => pooled.set(r.id, r));
-  }
+  // Pool across variants to decide what gets JUDGED. Note the depth is independent of the
+  // metric cutoff: pooling deeper than you measure is what stops a variant being rewarded for
+  // documents nobody judged, and unjudged documents count as non-relevant.
+  const rankedLists = Object.entries(VARIANTS).map(([, fn]) => [...pool].sort((a, b) => fn(b, qT) - fn(a, qT)));
+  const pooled = POOL_STRATEGY === 'mtf' ? mtfPool(rankedLists, POOL_DEPTH) : depthPool(rankedLists, POOL_DEPTH);
   const judgments = new Map();     // the effective judge
   const rubricJudge = new Map();   // rubric only, kept so the delta stays visible
   const docs = [];
@@ -225,8 +254,18 @@ for (const spec of QUERIES) {
                 venue: r.venue || '', source: r.source || '', citations: r.citations || 0,
                 abstract: (r.abstract || '').slice(0, 600) });
   }
+  // The candidate set plus every variant's score. Without this the pool can only be studied
+  // by re-running the search, which costs API calls (OpenAlex meters at $0.001/call against a
+  // $0.10/day anonymous budget). With it, pooling depth and strategy are offline parameters.
+  const candidates = [...pool].map(r => ({
+    id: r.id, title: r.title, year: r.year || null, venue: r.venue || '', source: r.source || '',
+    citations: r.citations || 0, abstract: (r.abstract || '').slice(0, 600),
+    scores: Object.fromEntries(Object.entries(VARIANTS).map(([n, fn]) => [n, fn(r, qT)])),
+  }));
   allJudgments[spec.id] = { query: spec.query, split: spec.split, judged: judgments.size,
-                            grades: [...judgments.values()], rubricGrades: [...rubricJudge.values()], docs };
+                            grades: [...judgments.values()], rubricGrades: [...rubricJudge.values()],
+                            poolDepth: POOL_DEPTH, poolStrategy: POOL_STRATEGY,
+                            candidates, judgedIds: [...pooled.keys()], docs };
 
   const metrics = (fn, jm) => {
     const ranked = [...pool].sort((a, b) => fn(b, qT) - fn(a, qT)).slice(0, K);
@@ -262,7 +301,8 @@ for (const r of rows) {
 }
 show('TRAIN split (weights were set here)', rows.filter(r => r.split === 'train'));
 show('TEST split (held out — this is the number that counts)', rows.filter(r => r.split === 'test'));
-console.log('\njudgments:', Object.values(allJudgments).reduce((a, j) => a + j.judged, 0),
+console.log(`\npooling: ${POOL_STRATEGY} @ depth ${POOL_DEPTH}, measured at cutoff ${K}`);
+console.log('judgments:', Object.values(allJudgments).reduce((a, j) => a + j.judged, 0),
   'pooled documents graded 0-3 by the EFFECTIVE judge (hand adjudication where it exists, else the rubric in tests/queries.json)');
 { // grade distribution: if nearly everything is a 2 or 3, the judge cannot discriminate
   const hist = [0, 0, 0, 0];

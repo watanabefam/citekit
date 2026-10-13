@@ -263,6 +263,36 @@ Read honestly:
 - **12 queries is under-powered.** The literature puts a stable system ranking at ~83 queries (MTC)
   or 30-60 judgments/query across ~100 queries. Treat everything above as directional.
 
+### Pool depth: the budget is the constraint, not the algorithm
+
+`tests/eval-ranking.mjs` pools for judging at `--pool-depth` (default 8) and measures at cutoff 8 —
+deliberately different parameters, because pooling deeper than you measure is what stops a variant
+being rewarded for documents nobody judged. `--pool-strategy depth|mtf` switches to **move-to-front
+pooling** (Cormack & Buettcher), which reaches a target pool *size* even when runs overlap, where
+fixed depth silently yields a shorter pool.
+
+`tests/pool-depth.mjs` re-pools an existing dump offline — **zero API calls** — which matters
+because OpenAlex meters at **$0.001/call against a $0.10/day anonymous budget (~100 calls/day,
+per IP, shared)**. A couple of eval runs exhaust it. Measured at equal adjudication cost:
+
+| pool/query | strategy | added vs depth-8 | unjudged | median best-variant rank of the added docs |
+|---|---|---|---|---|
+| 17.4 | depth (baseline) | — | — | — |
+| 17.0 | mtf | 1.0 | 1.0 | 10 |
+| 23.4 | depth | 6.0 | 5.6 | 10 |
+| 31.5 | depth | 14.1 | 13.5 | 13 |
+| 50.7 | depth | 33.3 | 32.4 | 23 |
+
+Read honestly:
+
+- **Volume buys progressively deeper documents**: what enters at ~17/query sits at median rank 10
+  in its best variant, and at ~51/query it is down at rank 23. Each one costs a judgment.
+- **MTF and fixed depth add the same volume at equal cost** (1.0 vs 0.0, 5.7 vs 6.0, 14.6 vs 14.1).
+  MTF's documented benefit is lower *bias* in system comparisons — a property 12 queries cannot
+  measure, so it stays in the code documented as untested here rather than claimed as a win.
+- **Doubling the pool costs ~400 more human judgments** across 12 queries. That is the real price
+  of "more volume", and it is a person (or a paid model), not an API call.
+
 - **Rendering is asserted, not eyeballed** — a Playwright pass drives real Chromium at three viewports
   (horizontal overflow, layout proportions, the Ask box staying on screen) and writes screenshots to
   `tests/screenshots/`.
