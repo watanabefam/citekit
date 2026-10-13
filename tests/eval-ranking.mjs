@@ -23,6 +23,27 @@ const html = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 const src = html.match(/<script>([\s\S]*)<\/script>/)[1];
 const QUERIES = JSON.parse(fs.readFileSync(new URL('./queries.json', import.meta.url), 'utf8')).queries;
 
+/* ---------- configuration: who judges, and with what ----------
+ * Judgments are resolved in order of authority:
+ *   1. tests/judgments.json       hand adjudication (a person read the documents)
+ *   2. tests/judgments.model.json cached model verdicts (written by --judge-model)
+ *   3. the rule-based rubric      the fallback, and the thing this file exists to distrust
+ * The rubric alone grades ~98% of pooled documents as relevant, which is why it cannot
+ * separate ranking variants. 1 and 2 exist to fix that.
+ * Usage: node tests/eval-ranking.mjs --judge-model gpt-4o-mini --provider openai --llm-key $KEY
+ *        (or CITEKIT_JUDGE_MODEL / CITEKIT_PROVIDER / CITEKIT_API_KEY / CITEKIT_BASE_URL)
+ */
+const ARG = process.argv.slice(2);
+const flag = n => { const i = ARG.indexOf(n); return i >= 0 ? ARG[i + 1] : undefined; };
+const readJson = f => { try { return JSON.parse(fs.readFileSync(new URL(f, import.meta.url), 'utf8')); } catch { return null; } };
+const HAND = readJson('./judgments.json') || {};
+const CACHED = readJson('./judgments.model.json') || {};
+const JUDGE_MODEL = flag('--judge-model') || process.env.CITEKIT_JUDGE_MODEL || '';
+const JUDGE_KEY = flag('--llm-key') || process.env.CITEKIT_API_KEY || '';
+const overrideOf = (qid, id) => HAND[qid]?.[id] ?? CACHED[qid]?.[id];
+const modelJudging = Boolean(JUDGE_MODEL && JUDGE_KEY);
+const modelOut = {};
+
 /* ---------- DOM stub ---------- */
 function makeEl(tag = 'div') {
   const e = { tagName: tag, _l: {}, children: [], style: {}, dataset: {}, _h: '', _t: '', value: '', checked: false,
@@ -113,6 +134,29 @@ function grade(rec, spec) {
   if (inTitle + inAbs === 1) return 1;
   return 0;
 }
+/* A stricter judge than the rubric, using whatever model the caller configured. Stingy on
+ * purpose: an assessor that calls everything relevant reproduces the rubric's blind spot. */
+async function modelGrade(rec, spec) {
+  const prompt = `Search query: ${spec.query}
+
+Document:
+Title: ${rec.title}
+Venue: ${rec.venue || '—'} (${rec.year || 'n.d.'})
+Abstract: ${(rec.abstract || '(no abstract)').slice(0, 900)}
+
+How relevant is this document to the search query? Reply with exactly one digit:
+3 = directly on topic
+2 = related and potentially useful
+1 = tangentially related
+0 = off topic`;
+  let acc = '';
+  try {
+    await LL.callLLM('You are a strict information-retrieval relevance assessor. Assume a document is NOT fully relevant unless it clearly is. Reply with a single digit and nothing else.', prompt, d => { acc += d; });
+  } catch { return null; }
+  const m = String(acc).match(/[0-3]/);
+  return m ? +m[0] : null;
+}
+
 const gain = rel => Math.pow(2, rel) - 1;
 function ndcg(ranked, judgments, k) {
   const dcg = arr => arr.slice(0, k).reduce((a, r, i) => a + gain(judgments.get(r.id) ?? 0) / Math.log2(i + 2), 0);
@@ -124,6 +168,28 @@ function ndcg(ranked, judgments, k) {
 }
 const precisionAt = (ranked, judgments, k, minRel = 2) =>
   ranked.slice(0, k).filter(r => (judgments.get(r.id) ?? 0) >= minRel).length / k;
+
+/* bpref (Buckley & Voorhees): built for exactly this situation — a pool where unjudged
+ * documents are assumed non-relevant and the judgment set is incomplete and biased toward
+ * whatever the systems already returned. It counts how often judged-relevant documents rank
+ * above judged-non-relevant ones, so it degrades gracefully where nDCG does not. */
+function bpref(ranked, judgments, minRel = 2) {
+  const relevant = [...judgments.entries()].filter(([, g]) => g >= minRel).map(([id]) => id);
+  const nonrel = new Set([...judgments.entries()].filter(([, g]) => g < minRel).map(([id]) => id));
+  // With no judged non-relevant document there is nothing to penalise against, and the
+  // formula divides by zero. Returning 0 there would read as "total failure" when the truth
+  // is "not applicable" — return null and let the report exclude the query.
+  if (!relevant.length || !nonrel.size) return null;
+  const order = ranked.map(r => r.id);
+  const denom = Math.min(relevant.length, nonrel.size);
+  let sum = 0;
+  for (const rid of relevant) {
+    const pos = order.indexOf(rid);
+    const above = pos < 0 ? nonrel.size : order.slice(0, pos).filter(id => nonrel.has(id)).length;
+    sum += 1 - above / denom;
+  }
+  return sum / relevant.length;
+}
 
 /* ---------- run ---------- */
 const K = 8;
@@ -143,14 +209,33 @@ for (const spec of QUERIES) {
   for (const [name, fn] of Object.entries(VARIANTS)) {
     [...pool].sort((a, b) => fn(b, qT) - fn(a, qT)).slice(0, K).forEach(r => pooled.set(r.id, r));
   }
-  const judgments = new Map();
-  for (const [id, r] of pooled) judgments.set(id, grade(r, spec));
-  allJudgments[spec.id] = { query: spec.query, split: spec.split, judged: judgments.size, grades: [...judgments.values()] };
+  const judgments = new Map();     // the effective judge
+  const rubricJudge = new Map();   // rubric only, kept so the delta stays visible
+  const docs = [];
+  for (const [id, r] of pooled) {
+    const rb = grade(r, spec);
+    rubricJudge.set(id, rb);
+    let g = overrideOf(spec.id, id);
+    if (g === undefined && modelJudging) {
+      g = await modelGrade(r, spec);
+      if (g !== null) (modelOut[spec.id] ||= {})[id] = g;
+    }
+    judgments.set(id, g === undefined ? rb : g);
+    docs.push({ id, grade: judgments.get(id), rubric: rb, title: r.title, year: r.year || null,
+                venue: r.venue || '', source: r.source || '', citations: r.citations || 0,
+                abstract: (r.abstract || '').slice(0, 600) });
+  }
+  allJudgments[spec.id] = { query: spec.query, split: spec.split, judged: judgments.size,
+                            grades: [...judgments.values()], rubricGrades: [...rubricJudge.values()], docs };
 
-  const result = { id: spec.id, split: spec.split, pool: pool.length, judged: judgments.size };
-  for (const [name, fn] of Object.entries(VARIANTS)) {
+  const metrics = (fn, jm) => {
     const ranked = [...pool].sort((a, b) => fn(b, qT) - fn(a, qT)).slice(0, K);
-    result[name] = { ndcg: ndcg(ranked, judgments, K), p5: precisionAt(ranked, judgments, 5), p8: precisionAt(ranked, judgments, 8) };
+    return { ndcg: ndcg(ranked, jm, K), bpref: bpref(ranked, jm), p5: precisionAt(ranked, jm, 5), p8: precisionAt(ranked, jm, 8) };
+  };
+  const result = { id: spec.id, split: spec.split, pool: pool.length, judged: judgments.size, rubricOnly: {} };
+  for (const [name, fn] of Object.entries(VARIANTS)) {
+    result[name] = metrics(fn, judgments);
+    result.rubricOnly[name] = metrics(fn, rubricJudge);
   }
   rows.push(result);
 }
@@ -161,10 +246,14 @@ const mean = (arr, f) => arr.reduce((a, x) => a + f(x), 0) / arr.length;
 const show = (label, subset) => {
   if (!subset.length) return;
   console.log(`\n${label} (${subset.length} queries, ${subset.reduce((a, r) => a + r.judged, 0)} pooled judgments)`);
-  console.log('  variant                          nDCG@8    P@5     P@8');
+  console.log('  variant                          nDCG@8   bpref    P@5     P@8    [rubric-only nDCG]');
   for (const name of Object.keys(VARIANTS)) {
-    console.log(`  ${name.padEnd(30)} ${mean(subset, r => r[name].ndcg).toFixed(3)}   ${mean(subset, r => r[name].p5).toFixed(3)}   ${mean(subset, r => r[name].p8).toFixed(3)}`);
+    const bv = subset.map(r => r[name].bpref).filter(v => v !== null);
+    const b = bv.length ? (bv.reduce((a, x) => a + x, 0) / bv.length).toFixed(3) : ' n/a ';
+    console.log(`  ${name.padEnd(30)} ${mean(subset, r => r[name].ndcg).toFixed(3)}   ${b}   ${mean(subset, r => r[name].p5).toFixed(3)}   ${mean(subset, r => r[name].p8).toFixed(3)}      ${mean(subset, r => r.rubricOnly[name].ndcg).toFixed(3)}`);
   }
+  const excluded = subset.filter(r => r[Object.keys(VARIANTS)[0]].bpref === null).length;
+  if (excluded) console.log(`  (bpref n/a for ${excluded}/${subset.length} queries — no judged non-relevant document to rank against)`);
 };
 console.log('Per-query nDCG@8:');
 for (const r of rows) {
@@ -173,18 +262,38 @@ for (const r of rows) {
 }
 show('TRAIN split (weights were set here)', rows.filter(r => r.split === 'train'));
 show('TEST split (held out — this is the number that counts)', rows.filter(r => r.split === 'test'));
-console.log('\njudgments:', Object.values(allJudgments).reduce((a, j) => a + j.judged, 0), 'pooled documents graded 0-3 by the rubric in tests/queries.json');
+console.log('\njudgments:', Object.values(allJudgments).reduce((a, j) => a + j.judged, 0),
+  'pooled documents graded 0-3 by the EFFECTIVE judge (hand adjudication where it exists, else the rubric in tests/queries.json)');
 { // grade distribution: if nearly everything is a 2 or 3, the judge cannot discriminate
   const hist = [0, 0, 0, 0];
   Object.values(allJudgments).forEach(j => j.grades.forEach(g => hist[g]++));
   const total = hist.reduce((a, b) => a + b, 0);
-  console.log('grade distribution: ' + hist.map((n, i) => `${i}:${n} (${Math.round(100 * n / total)}%)`).join('  '));
+  console.log('grade distribution (effective judge): ' + hist.map((n, i) => `${i}:${n} (${Math.round(100 * n / total)}%)`).join('  '));
   if (hist[2] + hist[3] > total * 0.85)
-    console.log('  ⚠ the rubric is too lenient to discriminate: >85% of pooled docs grade >=2.');
+    console.log('  ⚠ >85% of pooled docs still grade >=2. Only part of that is leniency in the judge:\n' +
+                '    a depth-8 pool is drawn from systems that already return good results, so it holds few\n' +
+                '    non-relevant documents BY CONSTRUCTION. Deeper pooling would discriminate more than a\n' +
+                '    stricter judge alone — which is also why bpref is n/a wherever nothing was judged <2.');
 }
 console.log('variants in column order: ' + Object.keys(VARIANTS).join(' / '));
-if (process.argv.includes('--judgments')) {
-  const out = process.argv[process.argv.indexOf('--judgments') + 1] || 'judgments.json';
+{ // judge comparison: does the blunter measure actually change the answer?
+  const eff = [0, 0, 0, 0], rub = [0, 0, 0, 0];
+  Object.values(allJudgments).forEach(j => {
+    j.grades.forEach(g => eff[g]++);
+    j.rubricGrades.forEach(g => rub[g]++);
+  });
+  const lenient = h => Math.round(100 * (h[2] + h[3]) / Math.max(1, h.reduce((a, b) => a + b, 0)));
+  console.log(`judge comparison: rubric grades >=2 for ${lenient(rub)}% of pooled docs; the effective judge grades >=2 for ${lenient(eff)}%`);
+}
+const dumpIdx = process.argv.indexOf('--judgments');
+if (dumpIdx >= 0) {
+  // NOTE: this must include the documents. An earlier version dumped only the grade arrays,
+  // which made the output impossible to re-adjudicate — you could not see what was graded.
+  const out = process.argv[dumpIdx + 1] || 'judgments.json';
   fs.writeFileSync(out, JSON.stringify(allJudgments, null, 2));
-  console.log('wrote raw judgments to ' + out);
+  console.log('wrote pooled documents + grades to ' + out);
+}
+if (Object.keys(modelOut).length) {
+  fs.writeFileSync(new URL('./judgments.model.json', import.meta.url), JSON.stringify(modelOut, null, 2));
+  console.log('cached model verdicts to tests/judgments.model.json (reused on later runs)');
 }

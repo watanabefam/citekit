@@ -206,38 +206,62 @@ directions, not validated constants.
 
 `tests/eval-ranking.mjs` implements the conventions the IR literature uses: **depth-k pooling**
 (judge the union of the top-8 from every ranking variant compared), **graded relevance 0-3**,
-**nDCG@8** as the primary metric with P@5/P@8 alongside, and a **train/test split of queries**
-so weights are chosen on one half and reported on the other. Queries and rubric live in
-`tests/queries.json`; raw judgments are written to JSON so they can be inspected or overridden.
+**nDCG@8** as the primary metric with **bpref** and P@5/P@8 alongside, and a **train/test split of
+queries** so weights are chosen on one half and reported on the other. Queries and rubric live in
+`tests/queries.json`.
 
-First run, 12 queries, 196 pooled judgments:
+Judgments resolve in order of authority:
 
-| variant | TRAIN nDCG@8 | **TEST nDCG@8** |
-|---|---|---|
-| legacy (abstract-only + citation nudge) | 0.714 | **0.832** |
-| current (lexical + citations + readability) | 0.952 | **0.966** |
-| v1 (consensus + recency — the variant dropped) | 0.941 | **0.977** |
+1. **`tests/judgments.json` — hand adjudication.** All 195 pooled documents were read (title,
+   venue, year, abstract) and graded strictly, and the file is committed, so the numbers below
+   reproduce without spending anything.
+2. **`tests/judgments.model.json` — cached model verdicts**, written by `--judge-model` and reused
+   on later runs. Bring your own key; nothing is sent anywhere by default.
+3. **The rule-based rubric** in `tests/queries.json` — the fallback, and the thing this harness
+   exists to distrust.
+
+```bash
+node tests/eval-ranking.mjs                                  # hand judge, rubric as fallback
+node tests/eval-ranking.mjs --judge-model gpt-4o-mini --provider openai \
+     --llm-key "$KEY" --judgments pool.json                  # model judge (BYOK)
+```
+
+### The blunt ruler was changing the answer
+
+Same 12 queries, same pools, two judges:
+
+| variant | TRAIN nDCG@8 (rubric → hand) | **TEST nDCG@8 (rubric → hand)** | TEST bpref |
+|---|---|---|---|
+| legacy (abstract-only + citation nudge) | 0.762 → 0.763 | **0.837 → 0.828** | 0.326 |
+| current (lexical + citations + readability) | 0.972 → **0.853** | **0.946 → 0.939** | 0.467 |
+| v1 (consensus + recency — the variant dropped) | 0.958 → 0.877 | **0.967 → 0.924** | 0.504 |
 
 Read honestly:
 
-- **The ranking rewrite is validated**: +0.13 nDCG@8 on held-out queries over the old ranking.
-- **The rejected consensus variant is not topically worse** — it scores ~equal-to-better here.
-  It was dropped for a different reason: it promoted records with **no full-text link**
-  (availability 8/8 → 1/8 in the earlier measurement), which is fatal for a tool that has to
-  quote what it cites. Two metrics disagreeing is the useful part; the reason for dropping it
-  is availability, not topicality.
-- **The judge cannot discriminate.** Grades came out 73% `3`, 25% `2`, 1% `0` — 98% of pooled
-  documents counted as relevant, so P@8 is 1.000 for every variant and nDCG is squeezed into
-  0.83–0.98. The rubric's core-term lists are too broad. The harness prints a warning when this
-  happens rather than letting the numbers look meaningful.
-- **12 queries is under-powered.** The literature puts a stable system ranking at ~83 queries
-  (MTC) or 30-60 judgments/query across ~100 queries. Treat everything above as directional.
-
-The honest next step is therefore **not** more weight tuning — it is a stricter judge: adjudicate
-the 196 pooled documents properly (human, or a model told to grade strictly), which turns this
-into an evaluation that can actually separate close variants.
-
-
+- **The rubric inflated the ranking rewrite's advantage on the training half more than two-fold.**
+  It showed `current` beating `legacy` by 0.210 nDCG@8; hand adjudication shows 0.090. The held-out
+  conclusion survives — `current` still beats `legacy`, 0.939 vs 0.828, so the rewrite is validated
+  — but by roughly half the margin the rubric implied.
+- **The hand judge downgraded 36 of 195 documents** (rubric 99% ≥2 → 92%), exposing two failure
+  modes the rubric was blind to:
+  - **Domain-word collisions.** For *teacher professional development literacy instruction*, the
+    rubric graded **AI literacy** and **ICT literacy** papers as fully relevant — the word
+    "literacy" appears, the topic does not. Same for *retrieval augmented generation*, where a
+    memory-research paper about **retrieval practice** scored as on-topic. This is a lexical
+    failure mode, and d4 — the query containing the collisions — is where the ranking scores worst
+    (0.63 / 0.47 / 0.57). The tool's weakness and the judge's were the same weakness.
+  - **Adjacent populations.** Signed reading fluency in deaf students; morphological awareness in
+    *college* students. Same construct, wrong population.
+- **Much of the remaining leniency is the pool, not the judge.** Even after adjudication, 92% of
+  pooled documents grade ≥2, because a depth-8 pool is drawn from systems that already return good
+  results — it holds few non-relevant documents *by construction*. That is also why **bpref is n/a
+  for 1/6 train and 3/6 test queries**: with nothing judged below 2 there is no non-relevant
+  document to rank against. Deeper pooling buys more discrimination than a stricter judge alone.
+- **The rejected consensus variant is not topically worse** — competitive under both judges and
+  best on bpref. It was dropped for availability, not topicality: it promoted records with no
+  full-text link (8/8 → 1/8). Two metrics disagreeing is the useful part.
+- **12 queries is under-powered.** The literature puts a stable system ranking at ~83 queries (MTC)
+  or 30-60 judgments/query across ~100 queries. Treat everything above as directional.
 
 - **Rendering is asserted, not eyeballed** — a Playwright pass drives real Chromium at three viewports
   (horizontal overflow, layout proportions, the Ask box staying on screen) and writes screenshots to
@@ -266,8 +290,10 @@ the part automation is worst at. Necessary, not sufficient.
 
 ## Known gaps (honest list)
 
-- **The ranking judge is a rubric, not a human.** 98% of pooled documents grade as relevant, so
-  the eval cannot separate close variants. See Evaluation above.
+- **The judge is a person once, not a procedure.** `tests/judgments.json` is a single hand
+  adjudication — it is not reproducible by a third party, and it cannot grow with the query set
+  without someone reading another few hundred abstracts. The `--judge-model` path exists to scale
+  it; no model judge has been run against this pool yet, so the two have never been compared.
 - **Keyboard and focus behaviour are asserted, but no screen reader has been driven.** Tab semantics,
   focus order, live regions and the skip link are covered by tests (see Accessibility below); a real
   VoiceOver/NVDA pass has not been run, and announcement timing is the part automation is worst at.
@@ -308,6 +334,9 @@ Rule of thumb: assemble if you mostly need *reading and citing*; keep this file 
    focus order and keyboard operability, but no screen reader has actually been driven.
 3. IndexedDB library with per-paper embeddings for large corpora.
 4. `citeproc-js` + CSL styles for real 10,000-style bibliographies.
-5. A stricter judge for the pooled documents (~196 now) — human or model adjudication — plus
-   growing the query set toward the ~80 the literature says is needed for a stable ranking.
+5. Deeper pooling (k=20 rather than 8) and grow the query set toward the ~80 the literature says
+   a stable system ranking needs. The judge is no longer the bottleneck: even after hand
+   adjudication 92% of pooled documents grade >=2, because a depth-8 pool barely contains
+   non-relevant documents at all. Also worth running `--judge-model` once to compare a model's
+   verdicts against the hand grades — the machinery is built and has never been exercised.
 6. Brave/Serper "web mode" adapter (same interface as the other sources).
