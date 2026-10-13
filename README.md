@@ -17,7 +17,7 @@ Then: **Settings** → pick provider → paste key → search → tick papers �
 Tick **dry run** first if you want to see the exact prompt before spending tokens.
 
 `node tests/verify.mjs` runs 87 behavioural assertions against live APIs and fake SSE providers.
-`tests/browser.mjs` (25 assertions) drives real Chromium; `tests/proxy-integration.mjs` (13) verifies
+`tests/browser.mjs` (40 assertions) drives real Chromium; `tests/proxy-integration.mjs` (16) verifies
 the optional Cloudflare Worker against the real workerd runtime.
 
 ---
@@ -239,19 +239,38 @@ into an evaluation that can actually separate close variants.
 
 
 
-- **No live-browser render check yet** — the app's logic is verified headlessly (**87/87** assertions) and
-  against real APIs, but the visual layout hasn't been smoke-tested in a browser from here.
+- **Rendering is asserted, not eyeballed** — a Playwright pass drives real Chromium at three viewports
+  (horizontal overflow, layout proportions, the Ask box staying on screen) and writes screenshots to
+  `tests/screenshots/`.
 - Semantic Scholar + arXiv need the worker deployed.
 - Library is `localStorage` (~5 MB) — full-text PDFs will fill it; move to IndexedDB for volume.
 - No PDF annotation layer, no document writer, no Google mode.
 - Single-user, no sync.
 
+## Accessibility
+
+A data-dense two-pane UI is easy to get wrong for keyboard and screen-reader users, so the browser
+suite asserts the mechanics rather than trusting them — 15 of its assertions exist for this.
+Following the W3C ARIA Authoring Practices and WCAG 2.2:
+
+| Criterion | What changed |
+| --- | --- |
+| 2.1.1 Keyboard | The Discover/Library switcher was `div` + `onclick`, so keyboard users could not switch views at all. It is now an APG tablist: roving tabindex, Enter/Space to activate, Left/Right to move. |
+| 2.4.1 Bypass Blocks | A skip link — the first focusable element on the page, off-screen until focused — targeting a now-focusable results region. |
+| 2.4.7 Focus Visible | An explicit `:focus-visible` ring; the dark custom-coloured buttons left the UA default low-contrast against `--panel`. No rule anywhere strips the outline. |
+| 4.1.2 Name, Role, Value | Named landmarks (both panes, a `role="search"` query row), `role="tab"` + `aria-selected` + `aria-controls` on the tabs, and an `aria-label` on the query input — a placeholder is not a label. |
+| 4.1.3 Status Messages | The result count is a `role="status"` live region that exists at page load (never injected later), and the results region carries `aria-busy` while a search is in flight. |
+
+What this does **not** prove: no screen reader has been driven, and live-region announcement timing is
+the part automation is worst at. Necessary, not sufficient.
+
 ## Known gaps (honest list)
 
 - **The ranking judge is a rubric, not a human.** 98% of pooled documents grade as relevant, so
   the eval cannot separate close variants. See Evaluation above.
-- **The browser pass covers one smoke flow and three viewport sizes** — no keyboard-only
-  navigation, focus-order or screen-reader audit yet.
+- **Keyboard and focus behaviour are asserted, but no screen reader has been driven.** Tab semantics,
+  focus order, live regions and the skip link are covered by tests (see Accessibility below); a real
+  VoiceOver/NVDA pass has not been run, and announcement timing is the part automation is worst at.
 - **Semantic Scholar still needs a key.** The proxy does *not* fix its shared-pool 429 (verified
   from Cloudflare's IP too). Same for **CORE**, whose anonymous quota 429s after a handful of
   requests. Both need free keys; neither is optional in practice.
@@ -285,7 +304,8 @@ Rule of thumb: assemble if you mostly need *reading and citing*; keep this file 
    URL into Settings → Proxy URL. Built and verified locally against the real workerd runtime;
    only the deploy needs an account. While there: `wrangler secret put S2_KEY` and `CORE_KEY`
    so the two key-gated sources actually work.
-2. Keyboard flow, focus states and a screen-reader pass on the browser test.
+2. A real screen-reader pass (VoiceOver/NVDA). The automated assertions cover roles, live regions,
+   focus order and keyboard operability, but no screen reader has actually been driven.
 3. IndexedDB library with per-paper embeddings for large corpora.
 4. `citeproc-js` + CSL styles for real 10,000-style bibliographies.
 5. A stricter judge for the pooled documents (~196 now) — human or model adjudication — plus

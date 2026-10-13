@@ -83,6 +83,89 @@ ok('search status line reports the counts', /\d+ unique papers/.test(await page.
 ok('first card shows a real paper title', (await page.locator('#results .card h3').first().innerText()).length > 15,
    (await page.locator('#results .card h3').first().innerText()).slice(0, 60));
 
+// ---- accessibility: only provable in a real browser, not in the DOM stub ----
+const a11y = await page.evaluate(() => {
+  const skip = document.querySelector('.skiplink');
+  const sheets = [...document.styleSheets];
+  let focusRule = '', outlinesKilled = false;
+  for (const sheet of sheets) {
+    try {
+      for (const r of sheet.cssRules) {
+        const cs = r.cssText || '';
+        if (r.selectorText && /:focus-visible/.test(r.selectorText)) focusRule = cs;
+        if (/:focus\b/.test(r.selectorText || '') && /outline:\s*(none|0)/i.test(cs)) outlinesKilled = true;
+      }
+    } catch {}
+  }
+  return {
+    skipHref: skip?.getAttribute('href') || '',
+    skipLeft: skip ? getComputedStyle(skip).left : '',
+    statusRole: document.getElementById('searchStatus')?.getAttribute('role') || '',
+    statusLive: document.getElementById('searchStatus')?.getAttribute('aria-live') || '',
+    busy: document.getElementById('results')?.getAttribute('aria-busy'),
+    resultsTabindex: document.getElementById('results')?.getAttribute('tabindex'),
+    searchLandmark: document.querySelectorAll('[role="search"]').length,
+    namedPanes: [...document.querySelectorAll('main > section.pane')].filter(s => s.getAttribute('aria-label')).length,
+    unlabelledTabs: [...document.querySelectorAll('.tab')].filter(t => t.getAttribute('role') !== 'tab').length,
+    selectedTabs: [...document.querySelectorAll('.tab')].filter(t => t.getAttribute('aria-selected') === 'true').length,
+    focusRule, outlinesKilled,
+  };
+});
+ok('a skip link exists and targets the results region (WCAG 2.4.1)', a11y.skipHref === '#results', a11y.skipHref);
+ok('the skip link stays off-screen until focused', a11y.skipLeft.startsWith('-'), 'left=' + a11y.skipLeft);
+ok('the results region is a valid skip target (focusable)', a11y.resultsTabindex === '-1', 'tabindex=' + a11y.resultsTabindex);
+ok('the status line is a live region present at load (WCAG 4.1.3)',
+   a11y.statusRole === 'status' && a11y.statusLive === 'polite', `${a11y.statusRole} / ${a11y.statusLive}`);
+ok('aria-busy is cleared once the search settles', a11y.busy === 'false', 'aria-busy=' + a11y.busy);
+ok('the query row is a search landmark', a11y.searchLandmark === 1, a11y.searchLandmark + ' role=search');
+ok('both panes have accessible names (WCAG 1.3.1)', a11y.namedPanes === 2, a11y.namedPanes + ' named');
+ok('every tab is role=tab with exactly one selected (WCAG 4.1.2)',
+   a11y.unlabelledTabs === 0 && a11y.selectedTabs === 1, `${a11y.selectedTabs} selected`);
+ok('an explicit :focus-visible ring is defined (WCAG 2.4.7)', /outline:\s*2px/.test(a11y.focusRule), a11y.focusRule.slice(0, 52));
+ok('no rule strips the focus outline', !a11y.outlinesKilled);
+
+// skip link is genuinely the first focusable element, and becomes visible when focused.
+// NOTE: blur() then Tab does NOT go back to the top — per spec the sequential-focus
+// starting point stays where the previously focused element was. Prime focus on <body>
+// (given a temporary tabindex so it can hold focus) to test the real first tab stop.
+const skipFirst = await page.evaluate(() => {
+  const focusable = [...document.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])')];
+  return { first: focusable[0] ? '.' + focusable[0].className : 'none', isSkip: focusable[0] === document.querySelector('.skiplink') };
+});
+ok('the skip link is the first focusable element in DOM order (WCAG 2.4.1)', skipFirst.isSkip, 'first = ' + skipFirst.first);
+await page.evaluate(() => { document.body.setAttribute('tabindex', '-1'); document.body.focus(); });
+await page.keyboard.press('Tab');
+const skip = await page.evaluate(() => {
+  const el = document.querySelector('.skiplink');
+  const r = el.getBoundingClientRect();
+  document.body.removeAttribute('tabindex');
+  return { focused: document.activeElement === el, onScreen: r.left >= 0 && r.width > 0, left: Math.round(r.left) };
+});
+ok('Tab from the top reaches the skip link', skip.focused, JSON.stringify(skip));
+ok('the skip link becomes visible on focus', skip.onScreen, 'left=' + skip.left);
+
+// the tab switcher was div+onclick — unreachable by keyboard before this pass
+const keyboardTab = await page.evaluate(() => {
+  const lib = document.querySelector('.tab[data-tab="library"]');
+  lib.focus();
+  lib.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  return { display: getComputedStyle(document.getElementById('tab-library')).display, selected: lib.getAttribute('aria-selected') };
+});
+ok('Enter activates a tab (WCAG 2.1.1 keyboard operable)',
+   keyboardTab.display === 'flex' && keyboardTab.selected === 'true', JSON.stringify(keyboardTab));
+const arrowTab = await page.evaluate(() => {
+  const s = document.querySelector('.tab[data-tab="search"]');
+  s.focus();
+  s.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+  return document.activeElement?.dataset?.tab || '';
+});
+ok('ArrowRight moves focus across tabs (roving tabindex)', arrowTab === 'library', 'focus → ' + arrowTab);
+await page.evaluate(() => {
+  const s = document.querySelector('.tab[data-tab="search"]');
+  s.focus();
+  s.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+});
+
 await page.screenshot({ path: shotDir + 'discover.png', fullPage: false });
 
 // ---- add to library, switch tabs ----
