@@ -2,3 +2,13 @@ node_modules/
 .DS_Store
 tests/screenshots/
 proxy/.wrangler/
+
+# Secrets must never reach git. Keys live in exactly two places:
+#   - the browser: localStorage, per user, never sent to a server you own
+#   - the worker:  `wrangler secret put S2_KEY|CORE_KEY|PROXY_KEY` (stored encrypted)
+# These patterns exist so a key cannot be committed by accident.
+.env
+.env.*
+*.dev.vars
+.dev.vars
+proxy/.dev.vars
