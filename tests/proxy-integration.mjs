@@ -97,5 +97,37 @@ ok('a cached response is byte-identical to the first', b1.length > 0 && b1 === b
 ok('responses never leak Set-Cookie', !r1.headers.get('set-cookie'));
 ok('responses carry a cacheable Cache-Control on success', /max-age=/.test(r2.headers.get('cache-control') || ''), r2.headers.get('cache-control') || '');
 
+// --- regression: the two app<->worker seam bugs found by dogfooding the CLI -------------
+// Both were invisible to this suite because it only ever exercised the ?url= form, which is
+// not what a user gets from pasting the bare worker URL into Settings.
+
+// (1) path-form proxy: S.proxy without a {url} placeholder emits <base>/<encoded-target>.
+LL.S.proxy = base + '/';
+const arxPath = await LL.searchArxiv('retrieval practice', { per: 3 }).catch(e => { console.log('   path-form arxiv err:', e.message); return []; });
+ok('a bare base-URL proxy setting works (path form, not just ?url=)', arxPath.length > 0,
+   arxPath.length ? `${arxPath.length} records` : 'returned 0 — the 400 regression is back');
+
+// (2) caller params are re-attached to the target when the target carries none of its own.
+//     arXiv requires search_query, so an empty parameter set cannot return entries.
+const reattach = await fetch(`${base}/${encodeURIComponent('https://export.arxiv.org/api/query')}?search_query=all:phonics&max_results=1`);
+const reattachBody = await reattach.text();
+ok('caller query params are re-attached to the proxied target', reattach.status === 200 && /<entry>/.test(reattachBody),
+   `HTTP ${reattach.status} · ${(reattachBody.match(/<entry>/g) || []).length} entries`);
+
+// (3) the S2 bug: params set on the proxy URL land on the PROXY's query string, where the
+//     worker drops them, so upstream received a query-less request. Assert the URL shape
+//     rather than the response, because S2 429s without a key either way.
+LL.S.proxy = base + '/?url=';
+const realFetch = globalThis.fetch;
+let captured = '';
+globalThis.fetch = async (u) => { captured = String(u); return { ok: true, status: 200, json: async () => ({ data: [] }) }; };
+await LL.searchS2('structured literacy', { per: 3 }).catch(() => {});
+globalThis.fetch = realFetch;
+let s2Target = '';
+try { s2Target = new URL(captured).searchParams.get('url') || ''; } catch {}
+ok('S2 builds the full target (query + fields) BEFORE proxying it',
+   /query=/.test(s2Target) && /fields=/.test(s2Target),
+   s2Target ? s2Target.slice(0, 74) + '…' : `captured: ${captured.slice(0, 74)}`);
+
 console.log(`\n=== proxy integration: ${pass} passed, ${fail} failed ===`);
 process.exit(fail ? 1 : 0);

@@ -15,8 +15,10 @@
 // Flags: --per N · --sources csv · --oa-only · --year-from YYYY · --json · --md · --out FILE
 //        --no-enrich · --queries FILE · --list-sources · --help
 //
-// Sources default to the keyless/CORS-open set. `s2`, `arxiv` need a CORS proxy (Settings → Proxy
-// URL / S.proxyUrl); `core` needs a free key. Those are opt-in via --sources.
+// Sources default to the keyless/CORS-open set. `s2`, `arxiv` need a CORS proxy (the app setting is
+// S.proxy — in the UI it is Settings → Proxy URL, but the stored key is untitled `proxy`); `core` needs
+// a free key. Without credentials those three are unreachable from the CLI, so they are opt-in via
+// --sources AND --proxy/--core-key (or CITEKIT_PROXY / CITEKIT_CORE_KEY).
 import fs from 'node:fs';
 import { loadLL } from './load-ll.mjs';
 
@@ -24,7 +26,9 @@ const KEYLESS = ['openalex', 'crossref', 'epmc', 'pubmed', 'eric', 'doaj'];
 const OPT_IN = ['s2', 'arxiv', 'core'];
 
 function parseArgs(argv) {
-  const o = { queries: [], per: 8, sources: KEYLESS.slice(), oaOnly: false, yearFrom: '', json: false, md: false, out: '', enrich: true, help: false, listSources: false };
+  const o = { queries: [], per: 8, sources: KEYLESS.slice(), oaOnly: false, yearFrom: '', json: false, md: false, out: '', enrich: true, help: false, listSources: false,
+    proxy: process.env.CITEKIT_PROXY || '', openalexKey: process.env.CITEKIT_OPENALEX_KEY || '',
+    s2Key: process.env.CITEKIT_S2_KEY || '', coreKey: process.env.CITEKIT_CORE_KEY || '' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--per') o.per = Math.max(1, parseInt(argv[++i], 10) || 8);
@@ -36,6 +40,10 @@ function parseArgs(argv) {
     else if (a === '--out') o.out = argv[++i];
     else if (a === '--no-enrich') o.enrich = false;
     else if (a === '--queries') o.queriesFile = argv[++i];
+    else if (a === '--proxy') o.proxy = argv[++i];
+    else if (a === '--openalex-key') o.openalexKey = argv[++i];
+    else if (a === '--s2-key') o.s2Key = argv[++i];
+    else if (a === '--core-key') o.coreKey = argv[++i];
     else if (a === '--list-sources') o.listSources = true;
     else if (a === '-h' || a === '--help') o.help = true;
     else if (a.startsWith('--')) { process.stderr.write(`unknown flag: ${a}\n`); o.help = true; }
@@ -66,13 +74,20 @@ Flags
   --out FILE         write output to FILE instead of stdout
   --no-enrich        skip the OpenAlex metadata-enrichment pass (saves metered OpenAlex calls)
   --queries FILE     read a JSON array of strings or {q|query} objects
-  --list-sources     print known sources and exit`;
+  --list-sources     print known sources and exit
+
+Credentials (or the CITEKIT_* env vars of the same name)
+  --proxy URL        CORS proxy base for s2 + arxiv (e.g. http://127.0.0.1:8788/)
+  --openalex-key K   raises OpenAlex's free daily budget from $0.10 to $1
+  --s2-key K         free Semantic Scholar key (raises its 429 rate limit)
+  --core-key K       free CORE key — required, core is unreachable without one`;
 
 async function main() {
   const o = parseArgs(process.argv.slice(2));
   if (o.help || (!o.queries.length && !o.listSources)) { console.log(HELP); process.exit(o.help ? 0 : 1); }
 
   const LL = await loadLL();
+  Object.assign(LL.S, { proxy: o.proxy, openalexKey: o.openalexKey, s2Key: o.s2Key, coreKey: o.coreKey });
   const registry = {
     openalex: (q, opts) => LL.searchOpenAlex(q, opts),
     crossref: (q, opts) => LL.searchCrossref(q, opts),
@@ -96,6 +111,13 @@ async function main() {
   const unknown = o.sources.filter(s => !registry[s]);
   if (unknown.length) process.stderr.write(`ignoring unknown source(s): ${unknown.join(', ')}\n`);
   if (!chosen.length) { process.stderr.write('no valid sources\n'); process.exit(1); }
+  const NEEDS = { s2: ['proxy', '--proxy', 'CITEKIT_PROXY'], arxiv: ['proxy', '--proxy', 'CITEKIT_PROXY'],
+                  core: ['coreKey', '--core-key', 'CITEKIT_CORE_KEY'] };
+  const blocked = chosen.filter(s => NEEDS[s] && !LL.S[NEEDS[s][0]]);
+  if (blocked.length) {
+    const how = [...new Set(blocked.map(s => `${NEEDS[s][1]} (or ${NEEDS[s][2]})`))].join(' + ');
+    process.stderr.write(`cannot reach ${blocked.join(', ')} without credentials — pass ${how}\n`);
+  }
 
   const opts = { oaOnly: o.oaOnly, yearFrom: o.yearFrom, per: o.per };
   const out = { generated: new Date().toISOString(), per: o.per, sources: chosen, queries: {} };

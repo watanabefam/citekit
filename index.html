@@ -541,14 +541,19 @@ function viaProxy(target) {
 }
 
 async function searchS2(q, {oaOnly, yearFrom, per = 20} = {}) {
-  const u = new URL(viaProxy('https://api.semanticscholar.org/graph/v1/paper/search'));
+  // Build the COMPLETE target URL *before* proxying it. Setting params on the proxy URL instead
+  // puts them on the proxy's own query string, where a pass-through proxy drops them: the
+  // upstream then receives a query-less request and either errors or returns the wrong set.
+  // arXiv below already had this order; S2 did not.
+  const u = new URL('https://api.semanticscholar.org/graph/v1/paper/search');
   u.searchParams.set('query', q);
   u.searchParams.set('limit', per);
   u.searchParams.set('fields', 'title,abstract,year,venue,authors,citationCount,externalIds,openAccessPdf,url');
   if (yearFrom) u.searchParams.set('year', yearFrom + '-');
+  const proxied = viaProxy(u.toString());
   const opts = { headers: { Accept: 'application/json' } };
   if (S.s2Key) opts.headers['x-api-key'] = S.s2Key;
-  const r = await fetch(u.toString(), opts);
+  const r = await fetch(proxied, opts);
   if (!r.ok) throw new Error('Semantic Scholar HTTP ' + r.status + (r.status === 429 ? ' (anonymous pool is rate-limited — add a free key)' : ''));
   const d = await r.json();
   return (d.data || []).map(p => ({

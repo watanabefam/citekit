@@ -96,13 +96,32 @@ export default {
     if (!ALLOWED_METHODS.includes(request.method))
       return json({ error: 'Method not allowed', allowed: ALLOWED_METHODS }, 405, origin);
 
-    const target = url.searchParams.get('url') || url.searchParams.get('uri');
+    // Accept the target in either form the app can emit:
+    //   ?url=/?uri=<encoded>            (an S.proxy setting containing a {url} placeholder)
+    //   /<encoded-target>               (a bare base URL pasted into Settings)
+    // Supporting only the query form 400s the most obvious configuration there is.
+    let target = url.searchParams.get('url') || url.searchParams.get('uri');
+    if (!target) {
+      const raw = url.pathname.replace(/^\/+/, '');
+      if (raw) { try { target = decodeURIComponent(raw); } catch { target = null; } }
+    }
     if (!target)
       return json({
         name: 'citekit scholarly proxy',
-        usage: `${url.origin}/?url=<encoded-target-url>`,
+        usage: [`${url.origin}/?url=<encoded-target-url>`, `${url.origin}/<encoded-target-url>`],
         allowedTargets: ALLOWED_TARGETS,
       }, 400, origin);
+
+    // Re-attach any caller params (other than the target selector) to the target, so a client
+    // that appends query params after proxying is not silently served a different request.
+    {
+      const extra = [...url.searchParams.entries()].filter(([k]) => k !== 'url' && k !== 'uri');
+      if (extra.length) {
+        const tu = new URL(target);
+        for (const [k, v] of extra) tu.searchParams.set(k, v);
+        target = tu.toString();
+      }
+    }
 
     // 2. Target lock — the real boundary.
     if (!targetAllowed(target))

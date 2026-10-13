@@ -64,9 +64,11 @@ Consequences baked into the code:
 - **OpenAlex is the backbone** — richest metadata, abstracts reconstructable from
   `abstract_inverted_index`, `best_oa_location.pdf_url` for open-access PDFs, and
   `fulltext.search` which matches title + abstract + **full text**.
-- **Semantic Scholar and arXiv need a CORS proxy.** `proxy/worker.js` is a 30-line Cloudflare
-  Worker that unlocks both (and can hold your S2 key server-side). Without it the app tells you
-  so instead of failing silently.
+- **Semantic Scholar and arXiv need a CORS proxy.** `proxy/worker.js` is a Cloudflare
+  Worker that unlocks both (and can hold your S2 key server-side — paste its URL into
+  Settings → Proxy URL; either form works, `https://<worker>.workers.dev/` or `.../?url=`, and the
+  target is checked against an allowlist either way). Without it the app tells you so instead of
+  failing silently.
 - **OpenAlex now meters usage** ($1 free/day, `meta.cost_usd` on every response). Fine for
   interactive research — a 100-result search costs $0.001 — but don't loop it.
 - OpenAlex **content API** serves cached PDFs at $0.01/file (100/day free) if you want to build a
