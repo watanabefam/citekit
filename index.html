@@ -744,7 +744,18 @@ async function expandCitations(seeds, { maxSeeds = 5, per = 200, refsPerSeed = 5
       }
     } catch { /* best effort */ }
   }
-  return out;
+  // A work can relate to two seeds at once (it cites one seed and is cited by another), so the
+  // same paper can arrive twice with different provenance. Collapse it, keeping the first label:
+  // the caller's count ("N via citations") should be papers, not edges. Found by running this
+  // against the live API — the stubbed fixture had unique ids and could never have caught it.
+  const seen = new Set(), unique = [];
+  for (const r of out) {
+    if (seen.has(r.id)) continue;
+    seen.add(r.id);
+    unique.push(r);
+  }
+  unique.duplicatesCollapsed = out.length - unique.length;
+  return unique;
 }
 
 /* ============================ search orchestration ============================ */

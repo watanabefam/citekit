@@ -227,10 +227,13 @@ Read honestly:
   Hence a checkbox, not a default.
 - **Page size is free, so the pages are big.** A page of 200 citing works costs the same as a page
   of 1 — small pages are pure waste. That rule is asserted rather than assumed.
-- **Verified against a stub, not yet end-to-end in the browser.** `node tests/citation-walk.mjs`
-  (12 assertions: provenance, DOI seeding, the seed cap, the big-page rule, graceful skipping)
-  covers the code path; the API shapes were confirmed live by hand. The full UI flow with a real
-  key has not been exercised.
+- **Verified against the stub AND live.** `node tests/citation-walk.mjs` (12 assertions, no
+  network) covers the code path; `node tests/citation-walk-live.mjs` (7 assertions) drives the real
+  walker against OpenAlex with a key — last run 413 records, 345 forward / 68 backward, 51% with a
+  PDF link. That live run found a duplicate-collapse bug the stub could never have caught: a paper
+  can cite one seed and be cited by another, so the same work arrived twice.
+- **Still not exercised: the checkbox in the browser UI.** Both suites call `expandCitations`
+  directly; the toggle, the merged re-rank and the status line have no automated coverage yet.
 
 ## Evaluation: what is actually measured, and how well
 
