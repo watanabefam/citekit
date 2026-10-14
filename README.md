@@ -202,6 +202,36 @@ directions, not validated constants.
 
 
 
+## Citation-graph walking — one level, both directions
+
+Opt in with **expand via citations**. After a search, the top 5 results become seeds and CiteKit
+walks the citation graph one level in each direction:
+
+| Direction | How | Cost |
+| --- | --- | --- |
+| **Forward** — who cites the seed | OpenAlex `filter=cites:<id>` | $0.0001 per page of **200** |
+| **Backward** — what the seed cites | `referenced_works` on the work itself (a **free** lookup), then one batched `openalex_id` hydration per 50 refs | free + $0.0001 |
+
+Seeds with no OpenAlex id are resolved by DOI in a single batched call, so a Crossref or ERIC
+record is walkable too. Every expanded record carries provenance (`cites-seed` / `cited-by-seed`
+plus the seed's title), is de-duplicated against the primary results, and is capped: 5 seeds, 200
+forward results per seed, 50 backward refs per seed.
+
+Read honestly:
+
+- **One level is deliberate.** Backward multiplies ~50× per paper and forward by the citation
+  count, so a second level explodes. The review literature (TARCiS/PRISMA-S — Cochrane makes
+  backward searching a mandatory step) is consistent that one level is what pays.
+- **Supplementary, never a replacement.** Standalone citation searching is documented to *miss*
+  literature that keyword search catches; what it adds is the terminologically disconnected work.
+  Hence a checkbox, not a default.
+- **Page size is free, so the pages are big.** A page of 200 citing works costs the same as a page
+  of 1 — small pages are pure waste. That rule is asserted rather than assumed.
+- **Verified against a stub, not yet end-to-end in the browser.** `node tests/citation-walk.mjs`
+  (12 assertions: provenance, DOI seeding, the seed cap, the big-page rule, graceful skipping)
+  covers the code path; the API shapes were confirmed live by hand. The full UI flow with a real
+  key has not been exercised.
+
 ## Evaluation: what is actually measured, and how well
 
 `tests/eval-ranking.mjs` implements the conventions the IR literature uses: **depth-k pooling**

@@ -131,6 +131,7 @@
         </div>
         <div class="row" style="margin-top:8px;font-size:12px;color:var(--muted);align-items:center">
           <label style="display:flex;gap:5px;align-items:center"><input type="checkbox" id="oaOnly"> open access only</label>
+          <label style="display:flex;gap:5px;align-items:center" title="One level, both directions: who cites your top results, and what they cite. Supplementary to the keyword search — it finds papers the search misses, and misses some it catches."><input type="checkbox" id="citeExpand"> expand via citations</label>
           <span>· from <input type="text" id="yearFrom" style="width:64px;display:inline-block" placeholder="2015"></span>
           <span>· * needs a proxy URL (Settings)</span>
         </div>
@@ -349,26 +350,32 @@ async function searchOpenAlex(q, {oaOnly, yearFrom, per = 25}) {
   if (f.length) u.searchParams.set('filter', f.join(','));
   if (S.openalexKey) u.searchParams.set('api_key', S.openalexKey);
   const d = checkShape('openalex', await jget(u.toString()));
-  return (d.results || []).map(w => {
-    const oa = w.open_access || {};                    // NOTE: is_oa lives here, NOT at top level
-    return {
-      id: 'openalex:' + w.id.split('/').pop(),
-      title: w.display_name || w.title || '(untitled)',
-      authors: (w.authorships || []).map(a => a.author?.display_name).filter(Boolean),
-      year: w.publication_year,
-      venue: w.primary_location?.source?.display_name || '',
-      doi: doiOf(w),
-      url: w.doi || w.primary_location?.landing_page_url || w.id,
-      pdf: w.best_oa_location?.pdf_url || oa.oa_url || '',
-      abstract: unInvert(w.abstract_inverted_index),
-      citations: w.cited_by_count || 0,
-      source: 'OpenAlex',
-      oa: !!(oa.is_oa ?? w.is_oa),
-      oaStatus: oa.oa_status || '',
-      fulltextCached: !!w.has_content?.pdf || !!w.has_fulltext,
-      retracted: !!w.is_retracted
-    };
-  });
+  return (d.results || []).map(openAlexToRecord);
+}
+
+/* One OpenAlex work -> one record. Extracted from searchOpenAlex so the citation walker emits
+   exactly the same shape as every other source. NOTE: is_oa lives under open_access, NOT at
+   the top level of a work (the *filter* uses the flat alias is_oa:true, which is a different
+   thing and cost me a bug once). */
+function openAlexToRecord(w) {
+  const oa = w.open_access || {};
+  return {
+    id: 'openalex:' + w.id.split('/').pop(),
+    title: w.display_name || w.title || '(untitled)',
+    authors: (w.authorships || []).map(a => a.author?.display_name).filter(Boolean),
+    year: w.publication_year,
+    venue: w.primary_location?.source?.display_name || '',
+    doi: doiOf(w),
+    url: w.doi || w.primary_location?.landing_page_url || w.id,
+    pdf: w.best_oa_location?.pdf_url || oa.oa_url || '',
+    abstract: unInvert(w.abstract_inverted_index),
+    citations: w.cited_by_count || 0,
+    source: 'OpenAlex',
+    oa: !!(oa.is_oa ?? w.is_oa),
+    oaStatus: oa.oa_status || '',
+    fulltextCached: !!w.has_content?.pdf || !!w.has_fulltext,
+    retracted: !!w.is_retracted
+  };
 }
 
 async function searchCrossref(q, {oaOnly, yearFrom, per = 20}) {
@@ -642,6 +649,104 @@ async function enrichWithOpenAlex(records) {
   return out;
 }
 
+/* ================== citation-graph walking (one level, both directions) ==================
+   What the guidance actually says (TARCiS/PRISMA-S; Cochrane makes backward searching
+   mandatory): go ONE level deep in BOTH directions, de-duplicate against the primary results,
+   and treat it as SUPPLEMENTARY — replication studies of standalone citation searching miss
+   literature the keyword search caught, and vice versa. So this adds to a search, never
+   replaces one.
+
+     BACKWARD  what a seed cites    -> referenced_works on the work itself: a FREE lookup,
+                                       then one batched openalex_id filter per 50 refs ($0.0001)
+     FORWARD   who cites a seed     -> filter=cites:<id>, where a page of 200 costs the same
+                                       as a page of 1 — so ask for big pages
+
+   One level is deliberate: backward multiplies ~50x per paper and forward by the citation
+   count, so a second level explodes. Measured cost is $0.0001/call, i.e. ~$0.0005 for a
+   five-seed walk — the caps below exist to stop a runaway loop, not to save money. */
+const CITATION_FIELDS = 'id,doi,display_name,publication_year,authorships,primary_location,open_access,best_oa_location,cited_by_count,abstract_inverted_index,is_retracted';
+
+/* Seeds already carrying an OpenAlex id need no lookup; the rest resolve by DOI in ONE call. */
+async function openAlexIdsFor(records) {
+  const have = new Map(), needDois = [];
+  for (const r of records) {
+    const m = /^openalex:(W\d+)$/.exec(r.id || '');
+    if (m) have.set(r, m[1]);
+    else { const d = doiOf(r); if (/^10\./.test(d)) needDois.push([r, d]); }
+  }
+  if (needDois.length) {
+    try {
+      const u = new URL('https://api.openalex.org/works');
+      u.searchParams.set('filter', 'doi:' + needDois.map(([, d]) => d).join('|'));
+      u.searchParams.set('per-page', '50');
+      u.searchParams.set('select', 'id,doi');
+      if (S.openalexKey) u.searchParams.set('api_key', S.openalexKey);
+      const d = checkShape('openalex', await jget(u.toString()));
+      const byDoi = new Map((d.results || []).map(w =>
+        [String(w.doi || '').replace(/^https?:\/\/doi\.org\//i, '').toLowerCase(), w.id.split('/').pop()]));
+      for (const [r, doi] of needDois) {
+        const wid = byDoi.get(doi.toLowerCase());
+        if (wid) have.set(r, wid);
+      }
+    } catch { /* resolving ids is best-effort: keep whatever we already matched */ }
+  }
+  return have;
+}
+
+async function expandCitations(seeds, { maxSeeds = 5, per = 200, refsPerSeed = 50 } = {}) {
+  const picked = (seeds || []).slice(0, maxSeeds);
+  if (!picked.length) return [];
+  const ids = await openAlexIdsFor(picked);
+  const short = r => (r.title || '').slice(0, 64);
+  const out = [];
+
+  // FORWARD — who cites the seed. 'cites-seed' means: this record cites the seed.
+  for (const seed of picked) {
+    const wid = ids.get(seed);
+    if (!wid) continue;
+    try {
+      const u = new URL('https://api.openalex.org/works');
+      u.searchParams.set('filter', 'cites:' + wid);
+      u.searchParams.set('per-page', String(per));
+      u.searchParams.set('select', CITATION_FIELDS);
+      if (S.openalexKey) u.searchParams.set('api_key', S.openalexKey);
+      const d = checkShape('openalex', await jget(u.toString()));
+      for (const w of d.results || []) out.push({ ...openAlexToRecord(w), via: 'cites-seed', viaSeed: short(seed) });
+    } catch { /* one seed failing must never fail the walk */ }
+  }
+
+  // BACKWARD — what the seed cites. 'cited-by-seed' means: the seed cites this record.
+  const refIds = [];
+  for (const seed of picked) {
+    const wid = ids.get(seed);
+    if (!wid) continue;
+    try {
+      const u = new URL('https://api.openalex.org/works/' + wid);
+      u.searchParams.set('select', 'referenced_works');
+      if (S.openalexKey) u.searchParams.set('api_key', S.openalexKey);
+      const d = await jget(u.toString());
+      for (const r of (d.referenced_works || []).slice(0, refsPerSeed)) refIds.push([r.split('/').pop(), short(seed)]);
+    } catch { /* free lookup, still optional */ }
+  }
+  for (let i = 0; i < refIds.length; i += 50) {
+    const chunk = refIds.slice(i, i + 50);
+    try {
+      const u = new URL('https://api.openalex.org/works');
+      u.searchParams.set('filter', 'openalex_id:' + chunk.map(([id]) => id).join('|'));
+      u.searchParams.set('per-page', '50');
+      u.searchParams.set('select', CITATION_FIELDS);
+      if (S.openalexKey) u.searchParams.set('api_key', S.openalexKey);
+      const d = checkShape('openalex', await jget(u.toString()));
+      for (const w of d.results || []) {
+        const wid = w.id.split('/').pop();
+        const hit = chunk.find(([id]) => id === wid);
+        out.push({ ...openAlexToRecord(w), via: 'cited-by-seed', viaSeed: hit ? hit[1] : '' });
+      }
+    } catch { /* best effort */ }
+  }
+  return out;
+}
+
 /* ============================ search orchestration ============================ */
 const SOURCES = {
   openalex: { box: '#src-openalex', fn: searchOpenAlex },
@@ -689,10 +794,19 @@ async function runSearch() {
     else errs.push(picked[i][0] + ': ' + res.reason.message);
   });
   RESULTS = rankResults(q, await enrichWithOpenAlex(dedupe(all).filter(r => r.title && r.title !== '(untitled)')));
+  if ($('#citeExpand')?.checked && RESULTS.length) {
+    $('#searchStatus').innerHTML = '<span class="spin"></span>walking citations from the top ' + Math.min(5, RESULTS.length) + '…';
+    const extra = await expandCitations(RESULTS, { maxSeeds: 5 });
+    if (extra.length) {
+      RESULTS = rankResults(q, dedupe([...RESULTS, ...extra]));
+      RESULTS.walked = extra.length;
+    }
+  }
   renderResults();
   $('#results').setAttribute('aria-busy', 'false');
   $('#searchStatus').textContent = `${RESULTS.length} unique papers` +
     (RESULTS.enrichedCount ? ` · ${RESULTS.enrichedCount} metadata-enriched` : '') +
+    (RESULTS.walked ? ` · ${RESULTS.walked} via citations` : '') +
     (errs.length ? ` · ${errs.length} source error(s)` : '');
   if (errs.length) $('#results').prepend(el('div', 'empty', '⚠ ' + errs.join(' | ')));
 }
@@ -1134,7 +1248,8 @@ refreshBadge(); renderLibrary(); renderResults(); renderCtxInfo();
 }
 window.LL = { runSearch, buildContext, cite, callLLM, S, LIB: () => LIB, RESULTS: () => RESULTS, ask, mdToHtml,
               addFiles, ingestRecord, searchOpenAlex, searchCrossref, searchEPMC, searchPubMed, searchS2, searchArxiv,
-              searchERIC, searchDOAJ, searchCORE, dedupe, checkShape, enrichWithOpenAlex, rankScore, rankResults };
+              searchERIC, searchDOAJ, searchCORE, dedupe, checkShape, enrichWithOpenAlex, rankScore, rankResults,
+              expandCitations, openAlexToRecord, openAlexIdsFor };
 </script>
 </body>
 </html>
