@@ -42,6 +42,10 @@ const JUDGE_MODEL = flag('--judge-model') || process.env.CITEKIT_JUDGE_MODEL || 
 const JUDGE_KEY = flag('--llm-key') || process.env.CITEKIT_API_KEY || '';
 const overrideOf = (qid, id) => HAND[qid]?.[id] ?? CACHED[qid]?.[id];
 const modelJudging = Boolean(JUDGE_MODEL && JUDGE_KEY);
+// The provider and baseUrl were documented but never read — so a non-default provider (Anthropic,
+// Gemini, OpenRouter) silently fell back to the app default and every judge call failed. Wire them.
+const JUDGE_PROVIDER = flag('--provider') || process.env.CITEKIT_PROVIDER || '';
+const JUDGE_BASE_URL = flag('--base-url') || process.env.CITEKIT_BASE_URL || '';
 const modelOut = {};
 
 /* ---------- DOM stub ---------- */
@@ -75,6 +79,12 @@ global.DOMParser = class { parseFromString(xml){
 global.URL.createObjectURL = () => 'blob:x'; global.URL.revokeObjectURL = () => {};
 new Function('window', 'location', src)(global.window, global.location);
 const LL = global.window.LL;
+// Apply the judge's model/provider/baseUrl to the app's own settings object, so callLLM — the
+// exact BYOK path the UI uses — is what runs the judging. Only override what was supplied.
+if (JUDGE_MODEL) LL.S.model = JUDGE_MODEL;
+if (JUDGE_KEY) LL.S.apiKey = JUDGE_KEY;
+if (JUDGE_PROVIDER) LL.S.provider = JUDGE_PROVIDER;
+if (JUDGE_BASE_URL) LL.S.baseUrl = JUDGE_BASE_URL;
 await new Promise(r => setTimeout(r, 30));
 
 /* ---------- fetch the real pool, once per query ---------- */

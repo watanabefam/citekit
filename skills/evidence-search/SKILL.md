@@ -23,8 +23,17 @@ Works in any agent that reads the Agent Skills standard (OpenCode, Codex, Claude
 
 ## The routing ladder — use what the host actually has
 
-Do not assume one tool. Walk this ladder top-down and stop at the first rung that works. Say
-which rung you used, because the answer's trustworthiness depends on it.
+Do not assume one tool. Walk this ladder top-down and stop at the first rung that works.
+
+**You MUST name the rung in the FIRST LINE of every answer. No exceptions.**
+
+```
+Rung: <number> — <the tool you actually called>
+```
+
+Announce it before you write anything else. This is not a courtesy: a reader cannot tell a database
+query from a blog post by reading your prose, so the rung line is the only thing that says how far
+the answer can be trusted. **An answer without it is incomplete — do not deliver it.**
 
 **1. Host-native research tool.** Almost every host ships one, and it is the cheapest path for
 web and general questions.
@@ -90,14 +99,39 @@ the host has an agentic deep-research mode. It is the slowest and least reproduc
 ## Output shape
 
 ```
+Rung: <number> — <the tool you actually called>
 <direct answer>[1][2]
 <evidence bullets, each carrying its own citation>[3]
 Uncertainty / gaps: <what the sources do not cover>
 
 Sources
-[1] Author (Year). Title. Venue. doi:…
+[1] Author (Year). Title. Venue. doi:…     <- the identifier is REQUIRED when the record has one
 [2] …
 ```
+
+The first line is **required**. The identifier on each source is **required whenever the record
+carries one** — an author-and-year is not checkable, so it is not a citation, it is a name-drop.
+
+## Rationalization table
+
+Every entry below is something an agent has actually done when running this skill, not a
+hypothetical.
+
+| Excuse | Reality |
+| --- | --- |
+| *Omitted the rung line entirely.* | The reader cannot separate a database query from a blog post. The line is required; the answer is not finished without it. |
+| "The rung is obvious from the sources list." | It is not. A source list looks identical whether it came from OpenAlex or from a search result page. |
+| "I web-searched, which is rung 1, so the ladder was followed." | For a *literature* question rung 1 is not enough on its own — a web search returns commentary about the studies, not the studies. Go to rung 2. |
+| "The paper name and year is a citation." | Without a DOI or URL it cannot be resolved. Name-drop, not citation. |
+| "A shorter answer was wanted, so I trimmed the boilerplate." | The rung line is not boilerplate. It is one line, and it is the line that makes the rest checkable. |
+
+## Red flags — stop and fix before delivering
+
+- Writing the answer and realising you never named the rung.
+- Saying "web search" in the rung line when you actually called an API, or the reverse.
+- A Sources block with no `doi:` or URL on any entry.
+- Reporting a count of sources you did not actually query.
+- Trimming the rung line because the answer "reads better" without it.
 
 ## References
 
