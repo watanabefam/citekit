@@ -4,8 +4,8 @@ description: Use when searching literature or researching a topic.
 license: MIT
 compatibility: Network access required. Host-native search, or the bundled scholarly APIs (no key for most), or both. An LLM key is only needed for in-app synthesis.
 metadata:
-  version: "0.1.0"
-  status: draft
+  version: "0.2.0"
+  status: "validated on 3+3 (see Validation; below the 5+ reps the discipline asks for)"
   tags: [research, literature, citations, scholarly, grounding, portable]
   related: [grounded-citations, byok-browser-apps]
 ---
@@ -132,6 +132,42 @@ hypothetical.
 - A Sources block with no `doi:` or URL on any entry.
 - Reporting a count of sources you did not actually query.
 - Trimming the rung line because the answer "reads better" without it.
+
+## Validation
+
+RED-GREEN-REFACTOR was run twice with fresh-context agents, on a pressure scenario (a
+10-minute deadline, a manager asking, "don't over-engineer it", an answer that will be quoted
+aloud). What was measured is the **written artifact** and the **tool calls in the transcript** —
+not the agents' self-reports, which disagreed with the transcripts in 2 of 4 runs in round 1.
+
+| round | scenario | rung line | numbered citations | reached a scholarly API |
+| --- | --- | --- | --- | --- |
+| 1 RED (no skill) | academic | n/a | 6, 7 | no — web search only |
+| 1 GREEN (skill) | academic | **0/2** | 6, 6 | 1 of 2 |
+| 2 RED (no skill) | pressure | n/a | **0, 0, 0** | no — web search only |
+| 2 GREEN (skill) | pressure | **3/3** | 3, 3, 3 | **3 of 3** |
+
+What each round taught:
+
+- **Round 1's baseline was wrong.** An academic prompt does not pressure the agent, so the
+  controls did not fail and the signal was muddy. The discipline warns about exactly this
+  ("too academic — the agent recites the skill").
+- **The rung requirement was not binding while it was prose.** Both round-1 skill runs omitted
+  it. Making it a structural first line of the mandated output template fixed it: 3/3.
+- **Under pressure the controls fail hard**: zero numbered citations and no scholarly API for a
+  literature question. That is precisely the failure this skill exists to prevent, and it only
+  became visible once the scenario carried real pressure.
+- **Measure the artifact, not a summary of it.** A first attempt to detect API use by grepping
+  transcripts for hostnames produced a false accusation that a rung line had misreported its
+  method: the calls were real, hidden inside a truncated multi-line command. A grep of a
+  summarised log is not evidence.
+
+Limits, stated rather than implied: 3+3 is below the 5+ reps the discipline asks for, so this is
+directional; the scenario is a single topic and a single pressure combination; and round 2
+produced no new rationalization, so the table below rests on round-1 and pre-existing failures.
+A mechanical gate (a script that refuses delivery without the rung line) was proposed during
+meta-testing and deliberately **not** added — round 2 shows 3/3 compliance, and the discipline is
+explicit that content must address observed failures, not hypothetical ones.
 
 ## References
 
