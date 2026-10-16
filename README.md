@@ -18,7 +18,8 @@ Tick **dry run** first if you want to see the exact prompt before spending token
 
 `node tests/verify.mjs` runs 87 behavioural assertions against live APIs and fake SSE providers.
 `tests/browser.mjs` (40 assertions) drives real Chromium; `tests/proxy-integration.mjs` (16) verifies
-the optional Cloudflare Worker against the real workerd runtime.
+the optional Cloudflare Worker against the real workerd runtime; `tests/mcp-server.mjs` (17) speaks
+the MCP protocol over stdio to the real server.
 
 ---
 
@@ -104,6 +105,44 @@ CORS + key requirement decide it for a static page. Everything here was probed l
 If you want one more, the best candidate is **HAL** (works, CORS-open, adds francophone OA) — but the higher-value next step for your domain is not another index, it's **citation-graph walking**: take a seed paper and pull its references + citing works through OpenAlex (`referenced_works`, `cites:`), which finds relevant literature no keyword search will.
 
 
+
+## MCP server — use it from any agent
+
+`tools/mcp-server.mjs` exposes the pipeline over the Model Context Protocol, so an agent uses
+CiteKit **by tool name** instead of fetching files and rebuilding a directory layout. Zero
+dependencies, deliberately: it is a thin adapter over the same `loadLL()` loader the CLI uses, so
+it runs `index.html`'s real shipping code — there is no second implementation to drift.
+
+```bash
+CITEKIT_OPENALEX_KEY=… node tools/mcp-server.mjs   # a client normally spawns this itself
+```
+
+Three tools:
+
+| Tool | What it does |
+|---|---|
+| `search_literature` | Nine sources at once, deduped, deterministically ranked |
+| `expand_citations` | One level of citation-graph walking, both directions, provenance-tagged |
+| `get_record` | Resolve a DOI to a full metadata record |
+
+A client needs the command and the environment, nothing else:
+
+```json
+{ "mcpServers": { "citekit": {
+  "command": "node",
+  "args": ["/absolute/path/to/citekit/tools/mcp-server.mjs"],
+  "env": { "CITEKIT_OPENALEX_KEY": "…" }
+} } }
+```
+
+Put the key in `env` rather than on a command line — process arguments are readable by every
+user on the machine. Five of the nine sources need no key, so the server is useful unkeyed with
+the small anonymous OpenAlex allowance. Requires Node 18+ (global `fetch`).
+
+`tests/mcp-server.mjs` (17 assertions) spawns the server and speaks the real protocol rather
+than assuming it: lifecycle and version agreement, capability declaration, tool schemas, the
+`-32602`/`-32601` error paths, the rule that a notification is never answered, two live tool
+calls, and stdio shutdown.
 
 ## Architecture
 
