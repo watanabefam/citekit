@@ -39,7 +39,7 @@ def run_one(base, qid, rep, query, timeout):
         fired = SIG in open(os.path.join(d, "transcript.jsonl")).read()
     except OSError:
         fired = False
-    return qid, rep, fired, dt
+    return fired, dt
 
 
 def main():
@@ -60,10 +60,13 @@ def main():
     n = {q["id"]: 0 for q in queries}
     work = [(q, r) for q in queries for r in range(1, a.runs + 1)]
 
+    def task(job):
+        q, rep = job
+        fired, dt = run_one(a.base, q["id"], rep, q["query"], a.timeout)
+        return q, rep, fired, dt
+
     with ThreadPoolExecutor(max_workers=a.workers) as ex:
-        for q, rep, fired, dt in ex.map(
-                lambda job: (job[0], job[1]) + run_one(a.base, job[0]["id"], job[1], job[0]["query"], a.timeout),
-                work):
+        for q, rep, fired, dt in ex.map(task, work):
             hits[q["id"]] += 1 if fired else 0
             n[q["id"]] += 1
             print(f"{q['id']} rep{rep} fired={fired} secs={dt}", flush=True)
