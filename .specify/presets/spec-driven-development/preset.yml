@@ -1,0 +1,89 @@
+schema_version: "1.0"
+
+preset:
+  id: "spec-driven-development"
+  name: "Spec-Driven Development Addenda"
+  version: "1.11.0"
+  description: "Appends problem framing, traceability, approval boundaries and verification sections to the core spec, plan and task templates without replacing them."
+  author: "watanabefam"
+  repository: "https://github.com/watanabefam/speckit-kit"
+  license: "MIT"
+
+requires:
+  # Bounded above as well as below: spec-kit is pre-2.0 and the append targets
+  # (spec/plan/tasks/constitution templates) are core template names.
+  speckit_version: ">=1.0.0,<2.0.0"
+
+provides:
+  templates:
+    # Command prepends: these are what make the template addenda land reliably.
+    #
+    # Why this exists: append-only presets depend on the agent resolving the composed
+    # template, and agents do not do so consistently — a dogfood run had plan.md and
+    # tasks.md carry the appended sections while spec.md silently did not. The command is
+    # the instruction the agent actually follows, so the section-integrity rule lives
+    # there. `prepend` composes with upstream command updates rather than replacing them
+    # (verified: prepend inserts after the YAML frontmatter, preserving it).
+    - type: "command"
+      name: "speckit.specify"
+      file: "commands/speckit.specify.prepend.md"
+      description: "Prepends a section-integrity instruction so appended template sections are not dropped from spec.md"
+      strategy: "prepend"
+
+    - type: "command"
+      name: "speckit.plan"
+      file: "commands/speckit.plan.prepend.md"
+      description: "Prepends a section-integrity instruction so appended template sections are not dropped from plan.md; also carries the repository sweep, repository-as-evidence, the bounded research rule, and the approval gate"
+      strategy: "prepend"
+
+    - type: "command"
+      name: "speckit.tasks"
+      file: "commands/speckit.tasks.prepend.md"
+      description: "Prepends a section-integrity instruction so appended template sections are not dropped from tasks.md"
+      strategy: "prepend"
+
+    # implement and converge generate no template artifact, so they carry the step
+    # rules (approved-work-only, evidence before done, honest ticking, handoff) that
+    # would otherwise live only in the skill — which fires on roughly 60% of relevant
+    # requests. Rules that must always apply cannot live behind a probabilistic trigger.
+    - type: "command"
+      name: "speckit.implement"
+      file: "commands/speckit.implement.prepend.md"
+      description: "Prepends the execution rules: approved work only, evidence before done, honest task ticking, repair the earliest artifact on contradiction"
+      strategy: "prepend"
+
+    - type: "command"
+      name: "speckit.converge"
+      file: "commands/speckit.converge.prepend.md"
+      description: "Prepends the convergence rules: evidence-based completion, no rounding up to green, verify declared boundaries, independent review by a non-author context, stress the asserted properties, handoff discipline"
+      strategy: "prepend"
+
+    - type: "template"
+      name: "constitution-template"
+      file: "templates/constitution-addendum.md"
+      description: "Appends eight delivery principles to the constitution template"
+      strategy: "append"
+
+    - type: "template"
+      name: "spec-template"
+      file: "templates/spec-addendum.md"
+      description: "Adds Carried Forward, Problem, Goals/Non-Goals, MVP scope and Requirement Traceability to the spec template"
+      strategy: "append"
+
+    - type: "template"
+      name: "plan-template"
+      file: "templates/plan-addendum.md"
+      description: "Adds repository findings, alternatives, risks, requirement-to-design traceability and implementation boundaries to the plan template"
+      strategy: "append"
+
+    - type: "template"
+      name: "tasks-template"
+      file: "templates/tasks-addendum.md"
+      description: "Adds per-task requirement links, scope boundaries and verification to the task template"
+      strategy: "append"
+
+tags:
+  - "spec-driven-development"
+  - "traceability"
+  - "verification"
+  - "templates"

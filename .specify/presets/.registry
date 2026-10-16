@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "presets": {
+    "spec-driven-development": {
+      "version": "1.11.0",
+      "source": "local",
+      "manifest_hash": "sha256:ab503054a8c487d4bd9d93f751dc0d06f229aeb3146a781782e6469cabfcfca1",
+      "enabled": true,
+      "priority": 10,
+      "registered_commands": {
+        "opencode": [
+          "speckit.specify",
+          "speckit.plan",
+          "speckit.tasks",
+          "speckit.implement",
+          "speckit.converge"
+        ]
+      },
+      "registered_skills": {},
+      "installed_at": "2026-10-16T19:26:12.528528+00:00"
+    }
+  }
+}

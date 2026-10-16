@@ -1,0 +1,162 @@
+# spec-driven-development — project hooks
+#
+# Shipped by speckit-init. Requires the `opencode-yaml-hooks` plugin, which runs
+# these on session and tool lifecycle events. Without that plugin this file is
+# inert — it does nothing and harms nothing.
+#
+# WHY THIS FILE EXISTS
+#
+# The kit puts its rules in commands, and says plainly that a command guarantees a
+# rule is READ, not that it is OBEYED. Commands are prompt text; the model can
+# deviate. For the handful of rules where deviation is not acceptable, this is the
+# layer that actually holds — a hook runs regardless of what the model decides.
+#
+# It is deliberately tiny. A hook that is wrong about something urgent gets
+# removed, and then none of them work. Both hooks here are near-zero-false-positive
+# and block only things that are wrong in essentially every case.
+#
+# Blocking contract (from the plugin): a bash action that exits 2 blocks the tool
+# call. `action: stop` additionally aborts the session — used here only for the
+# bypass hook, where continuing the session is not useful.
+
+hooks:
+  # ───────────────────────────────────────────────────────────────────────────
+  # 1. The bypass. `git commit --no-verify` skips the project's own hooks.
+  #
+  # This is the single most important rule to enforce at this layer, because it is
+  # the one a model under pressure will reach for. There is a documented case of an
+  # agent using --no-verify to bypass pre-commit hooks across six consecutive
+  # commits while reporting success. A rule about evidence that can be silently
+  # disabled is not a rule.
+  #
+  # `action: stop` because a session that has just tried to disable the checks is
+  # not one to keep going unattended.
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: block-commit-no-verify
+    event: tool.before.bash
+    action: stop
+    actions:
+      - bash:
+          command: |
+            set -euo pipefail
+            shopt -s nocasematch
+            payload=$(cat)
+
+            # ZERO-FORK PREFILTER — no "commit" token, allow immediately.
+            case "$payload" in
+              *commit* ) : ;;
+              *) exit 0 ;;
+            esac
+
+            command -v jq >/dev/null 2>&1 || exit 0
+            cmd=$(printf '%s' "$payload" | jq -r '.tool_args.command // empty' 2>/dev/null)
+            [ -z "$cmd" ] && exit 0
+
+            # BLOCK ANY git command that disables hook execution.
+            #
+            # Prior version anchored on `git commit`, which a whole bypass class
+            # defeats: `git -c core.hooksPath=/dev/null commit`,
+            # `git --no-pager --git-dir=.git --work-tree=. commit -n`, and any
+            # form with flags between `git` and `commit` never matched, so the
+            # guard silently stood aside. Found by an adversarial audit, not by
+            # reading. The predicate is now TOKEN-BASED (awk), because git parses
+            # a command as tokens, not a string: walk the tokens, remember "we
+            # are in git", and block on three unambiguous signals:
+            #
+            #   (a) `--no-verify` at any point in a git command (the flag exists
+            #       for one purpose — skip hooks);
+            #   (b) `core.hooksPath=<something>` (a git -c override that points
+            #       Git at an empty hooks dir — no-verify by another name);
+            #   (c) a `commit` subcommand followed later by a `-n` arg.
+            #       `-n` is ambiguous in isolation, so it only fires when a
+            #       commit subcommand was seen.
+            if awk '
+              {
+                saw_git = 0; saw_commit = 0
+                for (i = 1; i <= NF; i++) {
+                  t = $i
+                  if (t == "git")        { saw_git = 1; continue }
+                  if (!saw_git)           continue
+                  if (t == "--no-verify") { print "BLOCK"; exit }
+                  if (t ~ /^core\.hooksPath=/) { print "BLOCK"; exit }
+                  if (t == "commit" || t == "commit-tree") { saw_commit = 1 }
+                  if (saw_commit && t == "-n") { print "BLOCK"; exit }
+                }
+              }
+            ' <<<"$cmd" | grep -q BLOCK; then
+              echo "BLOCKED: this git command disables the project's checks (--no-verify, core.hooksPath override, or commit -n). The bypass is not available in this repo — fix what the hook is complaining about, or run the check directly to see the failure." >&2
+              exit 2
+            fi
+
+            exit 0
+          timeout: 10000
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 2. Generated files are not hand-edited.
+  #
+  # The kit tells the agent not to edit these, because speckit-init regenerates
+  # them and the edit is lost silently. Nothing enforced it, so an agent could
+  # spend real effort on a change that vanishes at the next install. This makes the
+  # warning true.
+  #
+  # Scope is narrow on purpose — near-zero false positives:
+  #   BLOCK  .opencode/commands/speckit*.md      (regenerated by speckit-init)
+  #   BLOCK  .specify/scripts/                   (spec-kit's own, regenerated)
+  #   BLOCK  .specify/templates/                 (regenerated by `specify init`)
+  #   BLOCK  .specify/presets/                   (installed from the kit)
+  #   ALLOW  everything else, explicitly including:
+  #          .specify/memory/constitution.md    (meant to be edited — /speckit.constitution)
+  #          specs/                             (your work)
+  #          .specify/extensions/               (extension config)
+  #          any .opencode/ file that is not a speckit command
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: protect-generated-files
+    event: tool.before.*
+    actions:
+      - bash:
+          command: |
+            set -euo pipefail
+            payload=$(cat)
+
+            # ZERO-FORK PREFILTER — only file-mutation tools matter.
+            case "$payload" in
+              *'"write"'*|*'"edit"'*|*'"multiedit"'*|*'"patch"'*|*'"apply_patch"'* ) : ;;
+              *) exit 0 ;;
+            esac
+
+            command -v jq >/dev/null 2>&1 || exit 0
+            tool=$(printf '%s' "$payload" | jq -r '.tool_name // empty' 2>/dev/null)
+            case "$tool" in
+              write|edit|multiedit|patch|apply_patch) : ;;
+              *) exit 0 ;;
+            esac
+
+            # Collect every path the call touches.
+            paths=$(printf '%s' "$payload" | jq -r '
+              [ .tool_args.filePath?,
+                .tool_args.file_path?,
+                (.changes[]?.path?),
+                (.changes[]?.toPath?) ]
+              | map(select(. != null and . != "")) | .[]' 2>/dev/null || true)
+            [ -z "$paths" ] && exit 0
+
+            while IFS= read -r p; do
+              [ -z "$p" ] && continue
+              # normalise: strip a leading ./ and any absolute prefix up to the project dir
+              case "$p" in
+                ./*) p="${p#./}" ;;
+                "$OPENCODE_PROJECT_DIR"/*) p="${p#"$OPENCODE_PROJECT_DIR"/}" ;;
+              esac
+              case "$p" in
+                .opencode/commands/speckit*.md \
+                | .specify/scripts/* \
+                | .specify/templates/* \
+                | .specify/presets/*)
+                  echo "BLOCKED: '$p' is generated and is overwritten on the next speckit-init / specify init, so an edit here is lost. Change it in the kit (preset/, commands/, templates/) and re-run speckit-init — or edit .specify/memory/constitution.md or specs/, which are yours." >&2
+                  exit 2
+                  ;;
+              esac
+            done <<< "$paths"
+
+            exit 0
+          timeout: 10000
