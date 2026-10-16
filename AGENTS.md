@@ -56,6 +56,6 @@ index.html              the entire app (UI, adapters, ranking, BYOK adapters, ci
 proxy/worker.js         hardened Cloudflare Worker unlocking the two no-CORS APIs
 tests/                  verification scripts — re-runnable, none mocked at the HTTP layer
 tools/                  load-ll.mjs (shared DOM-stub harness), search.mjs (headless CLI)
-skills/evidence-search/ portable Agent Skills draft — NOT installed or promoted yet
+skills/evidence-search/ portable Agent Skills — installed (symlinked into the host skills dir); validated: compliance on 3 pressure topics + trigger eval clean. Protocol + harness: validation-protocol.md, validation/
 README.md               the teardown, measured tables, and known-gaps list
 ```

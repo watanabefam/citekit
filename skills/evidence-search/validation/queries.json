@@ -1,0 +1,22 @@
+[
+  { "id": "t01", "should_trigger": true,  "query": "Does spaced repetition improve long-term retention? I'm giving a talk and need it to be accurate." },
+  { "id": "t02", "should_trigger": true,  "query": "what's the evidence on intermittent fasting and longevity" },
+  { "id": "t03", "should_trigger": true,  "query": "help me find papers about whether smaller class sizes help students" },
+  { "id": "t04", "should_trigger": true,  "query": "I need to substantiate this claim for a report: remote work boosts productivity. give me sources." },
+  { "id": "t05", "should_trigger": true,  "query": "I'm using CiteKit — find scholarly sources on sleep and memory consolidation" },
+  { "id": "t06", "should_trigger": true,  "query": "is there research showing open-access papers get cited more" },
+  { "id": "t07", "should_trigger": true,  "query": "my manager wants citations for the claim that meditation reduces stress" },
+  { "id": "t08", "should_trigger": true,  "query": "literature scan on the effect of music on exercise performance pls" },
+  { "id": "t09", "should_trigger": true,  "query": "can you find academic sources about the bystander effect" },
+  { "id": "t10", "should_trigger": true,  "query": "i need a citation-backed answer on whether vitamin d helps with depression" },
+  { "id": "n01", "should_trigger": false, "query": "cite the commit where we changed the ranking weights" },
+  { "id": "n02", "should_trigger": false, "query": "write me a short poem about citations" },
+  { "id": "n03", "should_trigger": false, "query": "what's the weather in Berlin today" },
+  { "id": "n04", "should_trigger": false, "query": "summarize this paragraph and make it shorter: the quick brown fox jumps over the lazy dog" },
+  { "id": "n05", "should_trigger": false, "query": "fix the typo in my README" },
+  { "id": "n06", "should_trigger": false, "query": "add a dark-mode toggle to my app" },
+  { "id": "n07", "should_trigger": false, "query": "explain recursion like I'm five" },
+  { "id": "n08", "should_trigger": false, "query": "format this bibtex entry nicely: @article{smith2020, title={A paper}, author={Smith, J.}, year={2020}}" },
+  { "id": "n09", "should_trigger": false, "query": "write a python script that queries the arXiv API and saves the titles" },
+  { "id": "n10", "should_trigger": false, "query": "what's the capital of Australia" }
+]

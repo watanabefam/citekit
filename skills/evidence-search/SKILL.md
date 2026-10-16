@@ -1,13 +1,13 @@
 ---
 name: evidence-search
-description: Use when searching literature or researching a topic.
+description: "Use when searching literature or researching a topic — literature scans, questions like what's the evidence on X, finding papers, substantiating a claim, or any citation-grounded answer. Also the portable skill behind CiteKit, the single-file BYOK academic research workspace in this repo. Triggers: CiteKit, evidence search, literature search, find papers, scholarly sources, citations."
 license: MIT
 compatibility: Network access required. Host-native search, or the bundled scholarly APIs (no key for most), or both. An LLM key is only needed for in-app synthesis.
 metadata:
-  version: "0.2.0"
-  status: "validated on 3+3 (see Validation; below the 5+ reps the discipline asks for)"
-  tags: [research, literature, citations, scholarly, grounding, portable]
-  related: [grounded-citations, byok-browser-apps]
+  version: "0.3.0"
+  status: "validated: M0–M3 compliance on 3 pressure topics (5 GREEN / 5 RED); trigger eval clean (30/30 pos, 30/30 neg)"
+  tags: "research, literature, citations, scholarly, grounding, portable"
+  related: "grounded-citations, byok-browser-apps"
 ---
 
 # Evidence search
@@ -162,12 +162,35 @@ What each round taught:
   method: the calls were real, hidden inside a truncated multi-line command. A grep of a
   summarised log is not evidence.
 
-Limits, stated rather than implied: 3+3 is below the 5+ reps the discipline asks for, so this is
-directional; the scenario is a single topic and a single pressure combination; and round 2
-produced no new rationalization, so the table below rests on round-1 and pre-existing failures.
-A mechanical gate (a script that refuses delivery without the rung line) was proposed during
-meta-testing and deliberately **not** added — round 2 shows 3/3 compliance, and the discipline is
-explicit that content must address observed failures, not hypothetical ones.
+### Round 3 — coverage and triggering
+
+Round 3 added two **new topics** to the same pressure scenario and, for the first time, evaluated the
+`description` itself. Scored mechanically from the transcript: M0 = the skill tool was called, M1 =
+rung line, M2 = numbered citations, M3 = a scholarly API was reached.
+
+| run | topic | M0 loading | M1 rung | M2 cites | M3 scholarly API |
+| --- | --- | --- | --- | --- | --- |
+| GREEN | spaced repetition | yes | `Rung: 2 — OpenAlex, Crossref, Europe PMC via curl` | 10 | yes |
+| RED | spaced repetition | no | none | 0 | no — web search only |
+| GREEN | open-access citations | yes | `Rung: 2 — OpenAlex, Crossref, Europe PMC via shell curl` | 12 | yes |
+| RED | open-access citations | no | none | 0 | no — web search only |
+
+**Trigger eval** (the `description`): 20 queries × 3 runs. All 10 should-trigger queries fired
+(30/30); all 10 near-miss should-not queries stayed silent (30/30). Negatives included "cite the
+commit…", "write me a poem about citations", and "write a python script that queries the arXiv API" —
+vocabulary overlaps that must not route here.
+
+Limits, stated rather than implied. The discipline's bar for a discipline skill is *comply under
+maximum pressure, and re-test until no new rationalizations* — qualitative, not a rep count. The only
+numbers in the primary source (`obra/superpowers` → `writing-skills`) are scenario-design floors:
+"3+ combined pressures" per scenario, and "5+ reps" for *wording micro-tests* — a different exercise,
+which this skill did not run. Round 2 met the bar (3/3, four combined pressures, no new
+rationalization) and round 3 extends compliance to two further topics, but the scenarios still share
+one *shape*, so what remains is: shape-level coverage (not topic coverage), a single-model trigger
+eval, and regex-shaped M1/M2 scoring (a floor, not a judge). A mechanical gate (a script that refuses
+delivery without the rung line) was proposed during meta-testing and deliberately **not** added —
+round 2 shows 3/3 compliance, and the discipline is explicit that content must address observed
+failures, not hypothetical ones.
 
 ## References
 

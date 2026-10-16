@@ -2,6 +2,8 @@ node_modules/
 .DS_Store
 tests/screenshots/
 proxy/.wrangler/
+__pycache__/
+*.pyc
 
 # Secrets must never reach git. Keys live in exactly two places:
 #   - the browser: localStorage, per user, never sent to a server you own
