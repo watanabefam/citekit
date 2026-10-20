@@ -15,8 +15,11 @@
 //   CITEKIT_OPENALEX_KEY   raises OpenAlex from $0.10/day to $1/day (recommended)
 //   CITEKIT_S2_KEY         Semantic Scholar, lifts the shared-pool 429
 //   CITEKIT_CORE_KEY       CORE
+//   TAVILY_API_KEY / CITEKIT_TAVILY_KEY, or ~/.config/citekit/tavily.key
 //
 // Usage:  node tools/mcp-server.mjs        (a client normally spawns this itself)
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadLL } from './load-ll.mjs';
@@ -30,6 +33,16 @@ const LL = await loadLL();
 if (process.env.CITEKIT_OPENALEX_KEY) LL.S.openalexKey = process.env.CITEKIT_OPENALEX_KEY;
 if (process.env.CITEKIT_S2_KEY) LL.S.s2Key = process.env.CITEKIT_S2_KEY;
 if (process.env.CITEKIT_CORE_KEY) LL.S.coreKey = process.env.CITEKIT_CORE_KEY;
+// Tavily is optional. Absent, the shipping adapter uses its keyless mode.
+// OpenCode rewrites its MCP config and can drop an inline `environment` block, so a
+// 0600 key file outside the repo is the persistent fallback. Environment still wins.
+const tavilyKeyFile = process.env.CITEKIT_TAVILY_KEY_FILE ||
+  path.join(os.homedir(), '.config', 'citekit', 'tavily.key');
+let tavilyKey = (process.env.CITEKIT_TAVILY_KEY || process.env.TAVILY_API_KEY || '').trim();
+if (!tavilyKey) {
+  try { tavilyKey = fs.readFileSync(tavilyKeyFile, 'utf8').trim(); } catch { /* keyless */ }
+}
+if (tavilyKey) LL.S.tavilyKey = tavilyKey;
 
 const REGISTRY = {
   openalex: (q, o) => LL.searchOpenAlex(q, o),
@@ -53,6 +66,16 @@ const trim = r => ({
   ...(r.via ? { via: r.via, viaSeed: r.viaSeed } : {}),
 });
 
+/* Web records are deliberately shaped differently from paper records: no authors, DOI, or
+   citation count, and an explicit `text` field so a client cannot mistake the extract for an
+   abstract. `kind: "web"` is the label every consumer keys on. */
+const trimWeb = r => ({
+  id: r.id, title: r.title, url: r.url, host: r.host || '', year: r.year || null,
+  source: 'Web', kind: 'web', provider: r.provider || 'Tavily',
+  score: r.score || 0, retrieved: r.retrieved || '',
+  text: (r.abstract || '').slice(0, LL.WEB_TEXT_CAP || 6000),
+});
+
 async function search({ query, sources = KEYLESS, per = 10, oaOnly = false, yearFrom = '', enrich = true, limit = 15 }) {
   const chosen = (Array.isArray(sources) ? sources : String(sources).split(',')).map(s => String(s).trim()).filter(s => REGISTRY[s]);
   if (!chosen.length) throw new Error('no valid sources; known: ' + Object.keys(REGISTRY).join(', '));
@@ -65,6 +88,19 @@ async function search({ query, sources = KEYLESS, per = 10, oaOnly = false, year
   const clean = LL.dedupe(all).filter(r => r.title && r.title !== '(untitled)');
   const ranked = LL.rankResults(query, enrich ? await LL.enrichWithOpenAlex(clean) : clean);
   return { query, sources: chosen, errors, total: ranked.length, records: ranked.slice(0, limit).map(trim) };
+}
+
+async function searchWeb({ query, limit = 8, domains = [], timeRange = '' }) {
+  const n = Math.max(1, Math.min(parseInt(limit, 10) || 8, 20));
+  const records = await LL.searchWeb(query, { per: n, domains, timeRange });
+  const ranked = LL.rankWebResults(query, LL.dedupeWeb(records));
+  return {
+    query,
+    provider: 'Tavily',
+    total: ranked.length,
+    records: ranked.slice(0, n).map(trimWeb),
+    note: 'General web pages, not peer-reviewed. Use search_literature for papers. Cite by URL; label web sources as web pages.',
+  };
 }
 
 async function expand({ query, dois, maxSeeds = 3, per = 200, limit = 40 }) {
@@ -102,6 +138,21 @@ async function getRecord({ doi }) {
 }
 
 const TOOLS = [
+  {
+    name: 'search_web',
+    title: 'Search the public web',
+    description: 'Search the public web with Tavily and return pages with title, URL, host, retrieval date and extracted text. Use it alongside Exa when Exa is available, or on its own when Exa is rate-limited. Results are general web pages, not peer-reviewed papers — use search_literature for papers.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'The web search query, in natural language.' },
+        limit: { type: 'integer', description: 'Pages returned (default 8, maximum 20).' },
+        domains: { type: 'array', items: { type: 'string' }, description: 'Optional include-list of domains, e.g. ["who.int","cdc.gov"].' },
+        timeRange: { type: 'string', enum: ['day', 'week', 'month', 'year'], description: 'Optional recency window supported by the provider.' },
+      },
+      required: ['query'],
+    },
+  },
   {
     name: 'search_literature',
     title: 'Search the scholarly literature',
@@ -147,6 +198,7 @@ const TOOLS = [
 ];
 
 const HANDLERS = {
+  search_web: searchWeb,
   search_literature: search,
   expand_citations: expand,
   get_record: getRecord,
@@ -168,8 +220,8 @@ async function handle(line) {
       return reply(id, {
         protocolVersion: asked === PROTOCOL_VERSION ? PROTOCOL_VERSION : PROTOCOL_VERSION,
         capabilities: { tools: {} },
-        serverInfo: { name: 'citekit', title: 'CiteKit scholarly search', version: '1.0.0' },
-        instructions: 'Search nine scholarly databases, rank deterministically, and walk the citation graph one level in both directions. Every record carries its source and a DOI or URL where the record has one. Five sources need no key; set CITEKIT_OPENALEX_KEY in the server environment to raise the OpenAlex budget and enable the full citation walk.',
+        serverInfo: { name: 'citekit', title: 'CiteKit research search', version: '1.1.0' },
+        instructions: 'Search nine scholarly databases, rank deterministically, walk the citation graph one level in both directions, and search the general web with Tavily. Use search_web alongside Exa when available, or alone when Exa is rate-limited. Web records are not peer-reviewed and are labelled kind="web". Five of the nine scholarly sources need neither a key nor a budget; set CITEKIT_OPENALEX_KEY to raise the OpenAlex budget and TAVILY_API_KEY (or CITEKIT_TAVILY_KEY) to raise the web limit.',
       });
     }
     if (method === 'ping') return reply(id, {});

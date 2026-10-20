@@ -1,9 +1,10 @@
 # CiteKit
 
 A self-contained academic research workspace that runs entirely in the browser: **nine scholarly
-databases, deterministic ranking, and citation-grounded answers through your own model key**. No
-backend, no build step, no account — one HTML file. Search ~300M works, ingest your own PDFs, and
-every claim comes back with a numbered citation you can click through.
+databases, a Tavily-backed web source, deterministic ranking, and citation-grounded answers through
+your own model key**. No backend, no build step, no account — one HTML file. Search ~300M works,
+add general web pages when you need them, ingest your own PDFs, and every claim comes back with a
+numbered citation you can click through.
 
 ```bash
 git clone https://github.com/watanabefam/citekit.git && cd citekit
@@ -16,10 +17,10 @@ browsers send no `Origin` header to `file://`, which some APIs require.)
 Then: **Settings** → pick provider → paste key → search → tick papers → *Add +* → ask questions.
 Tick **dry run** first if you want to see the exact prompt before spending tokens.
 
-`node tests/verify.mjs` runs 87 behavioural assertions against live APIs and fake SSE providers.
-`tests/browser.mjs` (40 assertions) drives real Chromium; `tests/proxy-integration.mjs` (16) verifies
-the optional Cloudflare Worker against the real workerd runtime; `tests/mcp-server.mjs` (17) speaks
-the MCP protocol over stdio to the real server.
+`node tests/verify.mjs` runs 95 behavioural assertions against live APIs and fake SSE providers.
+`tests/browser.mjs` (44 assertions) drives real Chromium; `tests/proxy-integration.mjs` (16) verifies
+the optional Cloudflare Worker against the real workerd runtime; `tests/mcp-server.mjs` (19) speaks
+the MCP protocol over stdio to the real server. `tests/tools-search.mjs` (11) covers the CLI.
 
 ---
 
@@ -31,7 +32,7 @@ model you already pay for. This is that teardown, part by part.
 | Capability | What the commercial tools run on | What CiteKit uses |
 |---|---|---|
 | **Semantic literature search** ("200M+ peer-reviewed papers") | Semantic Scholar Graph API | **OpenAlex** (primary, CORS-open) + Crossref, Europe PMC, PubMed, **ERIC**, **DOAJ**, **CORE**, Semantic Scholar, arXiv |
-| **Web search mode** | a search API | not included — OpenAlex full-text search covers the scholarly half; add Brave/Serper/Tavily on the same pattern if you want the web half |
+| **Web search mode** | a search API | **Tavily** — keyless by default, optional free key; web pages render in a separate *not peer-reviewed* section and never enter the scholarly ranking |
 | **Chat with your own papers** (quotes + page numbers) | embeddings + vector store + LLM | **page-level BM25-ish scoring** (deterministic, no embeddings) + pdf.js text extraction + your LLM with `[n, p.4]` citations |
 | **Model choice** (OpenAI / Anthropic / Gemini tiers) | vendor keys, vendor markup | **your key**: OpenRouter, OpenAI, Anthropic, Gemini, or any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, DeepSeek, Groq…) |
 | **Reference manager** (folders, tags, citation styles) | Zotero-style library | local library in `localStorage` + **BibTeX / RIS / CSL-JSON / APA export** (imports into Zotero, Paperpile, EndNote) |
@@ -55,6 +56,7 @@ model you supply. Nothing here reimplements a proprietary index.
 | `api.core.ac.uk` (300M+ OA works) | **yes in practice** | avoids wildcard CORS but 🚫 keyless = tiny shared quota → **429** | free key required for real use |
 | `api.semanticscholar.org` | recommended | ❌ **no CORS header**; anonymous pool returns **429** | free key = 1 rps dedicated |
 | `export.arxiv.org/api` | no | ❌ no CORS header | free |
+| `api.tavily.com/search` | optional | ✅ browser-origin request returned **HTTP 200** in Chromium (2026-10-20) | keyless is rate-limited; free key = **1,000 credits/month** |
 | `openrouter.ai/api/v1` | yes | ✅ `*` | your key, 400+ models |
 | `api.anthropic.com` | yes | ✅ `*` **only with** `anthropic-dangerous-direct-browser-access: true` | your key |
 | `api.openai.com` | yes | ✅ `*` | your key |
@@ -117,11 +119,12 @@ it runs `index.html`'s real shipping code — there is no second implementation 
 CITEKIT_OPENALEX_KEY=… node tools/mcp-server.mjs   # a client normally spawns this itself
 ```
 
-Three tools:
+Four tools:
 
 | Tool | What it does |
 |---|---|
 | `search_literature` | Nine sources at once, deduped, deterministically ranked |
+| `search_web` | Tavily web pages with title, URL, host, retrieval date and extracted text; optional domain and recency filters |
 | `expand_citations` | One level of citation-graph walking, both directions, provenance-tagged |
 | `get_record` | Resolve a DOI to a full metadata record |
 
@@ -131,25 +134,52 @@ A client needs the command and the environment, nothing else:
 { "mcpServers": { "citekit": {
   "command": "node",
   "args": ["/absolute/path/to/citekit/tools/mcp-server.mjs"],
-  "env": { "CITEKIT_OPENALEX_KEY": "…" }
+  "env": { "CITEKIT_OPENALEX_KEY": "…", "TAVILY_API_KEY": "…" }
 } } }
 ```
 
-Put the key in `env` rather than on a command line — process arguments are readable by every
-user on the machine. Five of the nine sources need no key, so the server is useful unkeyed with
-the small anonymous OpenAlex allowance. Requires Node 18+ (global `fetch`).
+Put keys in `env` rather than on a command line — process arguments are readable by every
+user on the machine. Five of the nine scholarly sources need neither a key nor a budget, and
+`search_web` works keyless with a rate limit; `TAVILY_API_KEY` (or `CITEKIT_TAVILY_KEY`) raises
+it. A client that rewrites its MCP entry (OpenCode does) can use a `0600` key file instead:
+the server reads `~/.config/citekit/tavily.key`, or `CITEKIT_TAVILY_KEY_FILE=/path`. Environment
+wins over the file. Requires Node 18+ (global `fetch`).
 
-`tests/mcp-server.mjs` (17 assertions) spawns the server and speaks the real protocol rather
+`tests/mcp-server.mjs` (19 assertions) spawns the server and speaks the real protocol rather
 than assuming it: lifecycle and version agreement, capability declaration, tool schemas, the
-`-32602`/`-32601` error paths, the rule that a notification is never answered, two live tool
+`-32602`/`-32601` error paths, the rule that a notification is never answered, four live tool
 calls, and stdio shutdown.
+
+## Web search (Tavily)
+
+The Web source is **on by default** in Discover. It is a separate lane, not a tenth scholarly
+source:
+
+- **No key required.** The browser calls `api.tavily.com/search` directly with
+  `X-Tavily-Access-Mode: keyless`. A free key in Settings raises the limit; the key stays in
+  `localStorage` and is sent only to Tavily.
+- **Browser-callable, re-verified.** On 2026-10-20 a real Chromium page received HTTP 200 from
+  the keyless endpoint with CORS headers. The same browser pass rendered **63 papers + 8 web
+  pages** for the structured-literacy query.
+- **Separate ranking.** Web pages are ordered by Tavily relevance, then lexical overlap. They
+  do not enter the paper score, and a web page is never merged with a paper by title.
+- **Labelled honestly.** Cards and prompt blocks say *web page (not peer-reviewed)*. The prompt
+  treats page text as untrusted data and tells the model to ignore instructions inside it.
+- **Capped text.** Each web result stores at most 6,000 characters; the answer context takes at
+  most half its slots from web, so default-on web cannot crowd out papers.
+- **Same implementation everywhere.** MCP `search_web`, `node tools/search.mjs --sources web`,
+  and the browser all drive the shipping adapter through `tools/load-ll.mjs`.
+
+Median added latency for the web lane has **not** been measured yet; the tests prove the path
+works, not that it is fast. Jina Search and self-hosted SearXNG remain parked as fallbacks.
 
 ## Architecture
 
 ```
 index.html ──┬─ adapters ──► OpenAlex / Crossref / Europe PMC / PubMed / ERIC / DOAJ / CORE (direct fetch, CORS)
              │                Semantic Scholar / arXiv                   (via proxy/worker.js)
-             ├─ dedupe ─────► DOI → title-normalised merge, provenance kept per record
+             ├─ web ────────► Tavily search (keyless or BYOK, browser-direct)
+             ├─ dedupe ─────► DOI → title-normalised merge; web deduped by canonical URL, kept separate
              ├─ library ────► metadata records (abstract) + full-text records (pdf.js pages)
              ├─ retrieval ──► deterministic term-frequency page/section ranking (no embeddings)
              ├─ prompt ─────► numbered [n] SOURCE blocks + strict citation-only system prompt
@@ -177,6 +207,7 @@ The whole pipeline (adapters → dedupe → OpenAlex enrichment → ranking) run
 node tools/search.mjs "structured literacy dyslexia" --per 8 --json --out candidates.json
 node tools/search.mjs --queries tests/queries.json --sources openalex,eric --per 5
 node tools/search.mjs "montessori lottery outcomes" --sources openalex,eric --oa-only --year-from 2015
+node tools/search.mjs "Tavily Search API" --sources web --per 3
 ```
 
 `tools/load-ll.mjs` loads `index.html`'s **real shipping script** under a DOM stub (the same
@@ -190,9 +221,10 @@ mis-attributed by hand downstream — this CLI prints the whole record so an **i
 (candidate generation → primary-source verification) never reconstructs metadata from memory.
 
 Flags: `--per N` · `--sources csv` · `--oa-only` · `--year-from YYYY` · `--json`/`--md` ·
-`--out FILE` · `--no-enrich` (skip the metered OpenAlex pass) · `--queries FILE` · `--list-sources`.
-Default sources are the keyless/CORS-open set; `s2`, `arxiv` (need the proxy) and `core` (needs a
-key) are opt-in. `node tests/tools-search.mjs` smoke-tests it.
+`--out FILE` · `--no-enrich` (skip the metered OpenAlex pass) · `--queries FILE` · `--list-sources` ·
+`--tavily-key K` · `--web-domains csv` · `--web-time day|week|month|year`.
+Default sources are the keyless/CORS-open set; `s2`, `arxiv` (need the proxy), `core` (needs a key)
+and `web` (Tavily, keyless by default) are opt-in. `node tests/tools-search.mjs` smoke-tests it.
 
 ## Ranking: deterministic, measured, and one signal rejected
 
@@ -409,7 +441,10 @@ the part automation is worst at. Necessary, not sufficient.
 - **Workers cannot fetch private/localhost addresses**, so the proxy can never reach a local
   model server — local LLMs are only usable browser-direct.
 - Library is `localStorage` (~5 MB) — full-text PDFs will fill it; move to IndexedDB for volume.
-- No PDF annotation layer, no document writer, no web/Google mode.
+- **Web search is Tavily-only.** No Google, Bing, Brave, or Serper adapter yet; keyless Tavily is
+  rate-limited, and the free key is the escape hatch. Jina Search and self-hosted SearXNG are
+  parked, not implemented. The web lane's median latency is unmeasured.
+- No PDF annotation layer, no document writer.
 - Single-user, no sync.
 
 ## Build vs assemble — if you'd rather not own a codebase
@@ -441,4 +476,5 @@ Rule of thumb: assemble if you mostly need *reading and citing*; keep this file 
    adjudication 92% of pooled documents grade >=2, because a depth-8 pool barely contains
    non-relevant documents at all. Also worth running `--judge-model` once to compare a model's
    verdicts against the hand grades — the machinery is built and has never been exercised.
-6. Brave/Serper "web mode" adapter (same interface as the other sources).
+6. Measure the web lane's median added latency, then add Jina Search or self-hosted SearXNG as a
+   fallback before considering Brave/Serper. Tavily is the only implemented web provider.

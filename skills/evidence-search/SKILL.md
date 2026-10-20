@@ -37,17 +37,19 @@ the answer can be trusted. **An answer without it is incomplete — do not deliv
 
 **1. Host-native research tool.** Almost every host ships one, and it is the cheapest path for
 web and general questions.
-- OpenCode: its built-in Exa/web search (`webfetch`, `websearch` or the Exa MCP) — often already configured.
+- OpenCode 1.18.30: its built-in web search is Exa or Parallel only. CiteKit's MCP `search_web`
+  (Tavily) is additive when Exa is available and the fallback when Exa is rate-limited.
 - Claude Code: `WebSearch` / `WebFetch`.
 - Hermes: `web_search`, `web_extract`, `browser_exec`.
 - Codex: its web search tool when enabled.
 If the host exposes one, use it first and cite it like any other source.
 
 **If CiteKit is available, it is usually the better start.** CiteKit ships an MCP server —
-`tools/mcp-server.mjs` — exposing the whole nine-source scholarly pipeline, so an agent that has it
-registered reaches the literature with no browser and no account. `CITEKIT_OPENALEX_KEY` is optional
-and only raises quota. Prefer it when registered. When it is **not** registered, do not conclude the
-pipeline is out of reach: fall through to rung 2 or 3 and call the same APIs by shell.
+`tools/mcp-server.mjs` — exposing the nine-source scholarly pipeline and a `search_web` tool, so an
+agent that has it registered reaches both literature and the general web with no browser and no
+account. `CITEKIT_OPENALEX_KEY` and `TAVILY_API_KEY` are optional and only raise quota; web search
+works keyless with a rate limit. Prefer it when registered. When it is **not** registered, do not
+conclude the pipeline is out of reach: fall through to rung 2 or 3 and call the same APIs by shell.
 
 > Do not report "CiteKit needs a browser, so an agent cannot use it" without opening `tools/`.
 > That claim is **wrong**, and it has been made: an agent asserted the limitation from the README's

@@ -57,7 +57,11 @@ const page = await ctx.newPage();
 const consoleErrors = [], pageErrors = [], badRequests = [];
 page.on('console', m => { if (m.type() === 'error') consoleErrors.push(m.text()); });
 page.on('pageerror', e => pageErrors.push(e.message));
-page.on('response', r => { if (r.status() >= 400 && !/semanticscholar|core\.ac\.uk/.test(r.url())) badRequests.push(r.status() + ' ' + r.url().slice(0, 70)); });
+page.on('response', r => {
+  const tolerated = /semanticscholar|core\.ac\.uk/.test(r.url())
+    || (r.url().includes('api.tavily.com') && r.status() === 429);
+  if (r.status() >= 400 && !tolerated) badRequests.push(r.status() + ' ' + r.url().slice(0, 70));
+});
 
 console.log('\nLive browser pass: ' + base);
 await page.goto(base, { waitUntil: 'domcontentloaded' });
@@ -67,8 +71,9 @@ ok('page loads with the expected title', (await page.title()).includes('CiteKit'
 ok('header, search box, ask box and tabs all render',
    await page.locator('header h1').isVisible() && await page.locator('#q').isVisible() &&
    await page.locator('#ask').isVisible() && await page.locator('.tab[data-tab="library"]').isVisible());
-ok('source checkboxes render (9 sources)', (await page.locator('.srcbar input[type=checkbox]').count()) === 9,
+ok('source checkboxes render (9 scholarly + web)', (await page.locator('.srcbar input[type=checkbox]').count()) === 10,
    (await page.locator('.srcbar input[type=checkbox]').count()) + ' checkboxes');
+ok('Web source is on by default', await page.isChecked('#src-web'));
 ok('no console errors on load', consoleErrors.length === 0, consoleErrors.slice(0, 2).join(' | '));
 ok('no uncaught page errors on load', pageErrors.length === 0, pageErrors.slice(0, 2).join(' | '));
 
@@ -79,7 +84,17 @@ let cards = 0;
 try { await page.waitForSelector('#results .card', { timeout: 60000 }); cards = await page.locator('#results .card').count(); } catch {}
 ok('search returns real rendered cards', cards > 0, cards + ' cards');
 ok('results carry rank + source pills', (await page.locator('#results .pill').count()) > 0, (await page.locator('#results .pill').count()) + ' pills');
-ok('search status line reports the counts', /\d+ unique papers/.test(await page.locator('#searchStatus').innerText()), (await page.locator('#searchStatus').innerText()).slice(0, 80));
+ok('search status line reports paper + web counts', /\d+ papers · \d+ web/.test(await page.locator('#searchStatus').innerText()), (await page.locator('#searchStatus').innerText()).slice(0, 80));
+const webCards = await page.locator('#results .websec .card.web').count();
+const webDegraded = /Web search degraded/.test(await page.locator('#results').innerText());
+ok('web results render in a separate Web section (or report degradation)', webCards > 0 || webDegraded, `${webCards} web cards`);
+ok('web section labels pages as not peer-reviewed', webDegraded || /not peer-reviewed/.test(await page.locator('#results .websec').innerText()));
+const cors = await page.evaluate(() => fetch('https://api.tavily.com/search', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', 'X-Tavily-Access-Mode': 'keyless' },
+  body: JSON.stringify({ query: 'Tavily Search API', max_results: 1 })
+}).then(r => r.status).catch(e => 'ERR:' + e.message));
+ok('Tavily accepts a browser-origin request (CORS re-verified in Chromium)', typeof cors === 'number', 'HTTP ' + cors);
 ok('first card shows a real paper title', (await page.locator('#results .card h3').first().innerText()).length > 15,
    (await page.locator('#results .card h3').first().innerText()).slice(0, 60));
 

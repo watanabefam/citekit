@@ -85,9 +85,9 @@ t('ping is answered', () => check(!pong.error, 'error: ' + deep(pong.error)));
 
 // ---- tools/list ------------------------------------------------------------------
 const list = await call('tools/list', {});
-t('tools\/list returns the three tools', () => {
+t('tools\/list returns the four tools', () => {
   const names = list.result.tools.map(x => x.name).sort();
-  check(deep(names) === deep(['expand_citations', 'get_record', 'search_literature']), 'got ' + deep(names));
+  check(deep(names) === deep(['expand_citations', 'get_record', 'search_literature', 'search_web']), 'got ' + deep(names));
 });
 t('every tool carries name, description and an object inputSchema', () => {
   for (const tool of list.result.tools) {
@@ -100,6 +100,12 @@ t('every tool carries name, description and an object inputSchema', () => {
 t('search_literature requires a query', () => {
   const s = list.result.tools.find(x => x.name === 'search_literature');
   check(deep(s.inputSchema.required) === deep(['query']), 'required = ' + deep(s.inputSchema.required));
+});
+t('search_web requires a query and advertises domain/time filters', () => {
+  const s = list.result.tools.find(x => x.name === 'search_web');
+  check(deep(s.inputSchema.required) === deep(['query']), 'required = ' + deep(s.inputSchema.required));
+  check(!!s.inputSchema.properties.domains, 'no domains filter');
+  check(!!s.inputSchema.properties.timeRange, 'no timeRange filter');
 });
 
 // ---- protocol errors -------------------------------------------------------------
@@ -139,6 +145,19 @@ t('search_literature returns ranked records from a keyless source', () => {
   check(p.records.length > 0, 'no records (' + deep(p.errors) + ')');
   check(p.records.every(r => r.title), 'a record has no title');
   check(p.records.every(r => 'id' in r && 'doi' in r), 'a record lost id/doi, so expand_citations could not seed from it');
+});
+
+const web = await call('tools/call', {
+  name: 'search_web',
+  arguments: { query: 'Tavily Search API', limit: 2 },
+});
+t('search_web returns labelled web records with extracted text', () => {
+  check(!web.result.isError, web.result.content[0].text);
+  const p = web.result.structuredContent;
+  check(p.records.length > 0, 'no web records');
+  check(p.records.every(r => r.kind === 'web' && /^https?:\/\//.test(r.url)), 'a record is not a labelled web page');
+  check(p.records.every(r => typeof r.text === 'string' && r.text.length > 50), 'a record has no extracted text');
+  check(p.records.every(r => r.source === 'Web' && r.provider === 'Tavily'), 'provenance missing');
 });
 
 const ex = await call('tools/call', {

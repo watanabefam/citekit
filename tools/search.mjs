@@ -14,11 +14,13 @@
 //
 // Flags: --per N · --sources csv · --oa-only · --year-from YYYY · --json · --md · --out FILE
 //        --no-enrich · --queries FILE · --list-sources · --help
+//        --tavily-key K · --web-domains csv · --web-time day|week|month|year
 //
 // Sources default to the keyless/CORS-open set. `s2`, `arxiv` need a CORS proxy (the app setting is
 // S.proxy — in the UI it is Settings → Proxy URL, but the stored key is untitled `proxy`); `core` needs
 // a free key. Without credentials those three are unreachable from the CLI, so they are opt-in via
-// --sources AND --proxy/--core-key (or CITEKIT_PROXY / CITEKIT_CORE_KEY).
+// --sources AND --proxy/--core-key (or CITEKIT_PROXY / CITEKIT_CORE_KEY). `web` is Tavily: keyless by
+// default, or --tavily-key / TAVILY_API_KEY / CITEKIT_TAVILY_KEY.
 import fs from 'node:fs';
 import { loadLL } from './load-ll.mjs';
 
@@ -28,7 +30,9 @@ const OPT_IN = ['s2', 'arxiv', 'core'];
 function parseArgs(argv) {
   const o = { queries: [], per: 8, sources: KEYLESS.slice(), oaOnly: false, yearFrom: '', json: false, md: false, out: '', enrich: true, help: false, listSources: false,
     proxy: process.env.CITEKIT_PROXY || '', openalexKey: process.env.CITEKIT_OPENALEX_KEY || '',
-    s2Key: process.env.CITEKIT_S2_KEY || '', coreKey: process.env.CITEKIT_CORE_KEY || '' };
+    s2Key: process.env.CITEKIT_S2_KEY || '', coreKey: process.env.CITEKIT_CORE_KEY || '',
+    tavilyKey: process.env.CITEKIT_TAVILY_KEY || process.env.TAVILY_API_KEY || '',
+    webDomains: [], webTimeRange: '' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--per') o.per = Math.max(1, parseInt(argv[++i], 10) || 8);
@@ -44,6 +48,9 @@ function parseArgs(argv) {
     else if (a === '--openalex-key') o.openalexKey = argv[++i];
     else if (a === '--s2-key') o.s2Key = argv[++i];
     else if (a === '--core-key') o.coreKey = argv[++i];
+    else if (a === '--tavily-key' || a === '--web-key') o.tavilyKey = argv[++i];
+    else if (a === '--web-domains') o.webDomains = argv[++i].split(',').map(s => s.trim()).filter(Boolean);
+    else if (a === '--web-time') o.webTimeRange = argv[++i];
     else if (a === '--list-sources') o.listSources = true;
     else if (a === '-h' || a === '--help') o.help = true;
     else if (a.startsWith('--')) { process.stderr.write(`unknown flag: ${a}\n`); o.help = true; }
@@ -68,6 +75,7 @@ Flags
   --per N            results per source (default 8)
   --sources csv      default: ${KEYLESS.join(',')}
                      opt-in (need proxy/key): ${OPT_IN.join(',')}
+                     web: Tavily (keyless by default)
   --oa-only          open-access filter (sources that support it)
   --year-from YYYY   publication-year floor (sources that support it)
   --json | --md      output format (default: markdown to stdout)
@@ -80,15 +88,19 @@ Credentials (or the CITEKIT_* env vars of the same name)
   --proxy URL        CORS proxy base for s2 + arxiv (e.g. http://127.0.0.1:8788/)
   --openalex-key K   raises OpenAlex's free daily budget from $0.10 to $1
   --s2-key K         free Semantic Scholar key (raises its 429 rate limit)
-  --core-key K       free CORE key — required, core is unreachable without one`;
+  --core-key K       free CORE key — required, core is unreachable without one
+  --tavily-key K     optional Tavily key for web (keyless works with limits)
+  --web-domains csv  optional Tavily include-list, e.g. who.int,cdc.gov
+  --web-time RANGE   optional Tavily recency: day|week|month|year`;
 
 async function main() {
   const o = parseArgs(process.argv.slice(2));
   if (o.help || (!o.queries.length && !o.listSources)) { console.log(HELP); process.exit(o.help ? 0 : 1); }
 
   const LL = await loadLL();
-  Object.assign(LL.S, { proxy: o.proxy, openalexKey: o.openalexKey, s2Key: o.s2Key, coreKey: o.coreKey });
+  Object.assign(LL.S, { proxy: o.proxy, openalexKey: o.openalexKey, s2Key: o.s2Key, coreKey: o.coreKey, tavilyKey: o.tavilyKey });
   const registry = {
+    web: (q, opts) => LL.searchWeb(q, { per: opts.per, domains: o.webDomains, timeRange: o.webTimeRange }),
     openalex: (q, opts) => LL.searchOpenAlex(q, opts),
     crossref: (q, opts) => LL.searchCrossref(q, opts),
     epmc: (q, opts) => LL.searchEPMC(q, opts),
@@ -104,6 +116,7 @@ async function main() {
     console.log('known sources:', Object.keys(registry).join(', '));
     console.log('default:      ', KEYLESS.join(', '));
     console.log('opt-in:       ', OPT_IN.join(', '), '(proxy/key required)');
+    console.log('web:           web (Tavily; keyless or --tavily-key)');
     return;
   }
 
@@ -132,8 +145,14 @@ async function main() {
     });
     let ranked = [];
     try {
-      const clean = LL.dedupe(all).filter(r => r.title && r.title !== '(untitled)');
-      ranked = LL.rankResults(query, o.enrich ? await LL.enrichWithOpenAlex(clean) : clean);
+      // Web and papers stay separate: a web page must never be merged into a paper by title,
+      // and its provider score must not be replaced by the scholarly rank formula.
+      const rawWeb = all.filter(r => r.kind === 'web');
+      const rawPapers = all.filter(r => r.kind !== 'web');
+      const clean = LL.dedupe(rawPapers).filter(r => r.title && r.title !== '(untitled)');
+      const papers = LL.rankResults(query, o.enrich ? await LL.enrichWithOpenAlex(clean) : clean);
+      const web = LL.rankWebResults(query, LL.dedupeWeb(rawWeb));
+      ranked = papers.concat(web);
     } catch (e) { errs.push('rank/enrich: ' + e.message); }
     process.stderr.write(`   ${all.length} raw → ${ranked.length} unique${errs.length ? ' · errors: ' + errs.join(' | ') : ''}\n`);
     out.queries[query] = { count: ranked.length, errors: errs, records: ranked };
@@ -155,6 +174,7 @@ function toMarkdown(out) {
       lines.push(
         `### ${r.title || '(untitled)'} (${r.year || 'n.d.'})`,
         `**Authors:** ${authors(r)}`,
+        `**Type:** ${r.kind === 'web' ? 'web page (not peer-reviewed)' : 'scholarly record'}`,
         `**Venue:** ${r.venue || '—'}  ·  **cited by:** ${r.citations || 0}  ·  **source:** ${r.source || '—'}${r.oa ? '  ·  **OA**' : ''}`,
         `**DOI:** ${r.doi || '—'}${r.url ? `  ·  ${r.url}` : ''}${r.pdf ? `\n**PDF:** ${r.pdf}` : ''}`,
         abs ? `\n${abs}` : '\n_[no abstract]_', ''

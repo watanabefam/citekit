@@ -19,6 +19,7 @@ const help = run(['--help']);
 ok('--help exits 0 and prints usage', /headless search/.test(help) && /--sources/.test(help));
 const list = run(['--list-sources']);
 ok('--list-sources lists openalex + opt-in sources', /openalex/.test(list) && /s2/.test(list) && /proxy\/key/.test(list));
+ok('--list-sources lists the web source', /web \(Tavily/.test(list), list.split('\n').pop());
 
 console.log('\n2. live search — JSON contract (real network, keyless source)');
 const out = path.join(os.tmpdir(), 'll-cli-test-' + Date.now() + '.json');
@@ -35,6 +36,18 @@ const fields = ['title', 'authors', 'year', 'doi', 'source'];
 ok('record carries the full schema', fields.every(f => f in r), 'have: ' + Object.keys(r).join(','));
 ok('authors is a non-empty array', Array.isArray(r.authors) && r.authors.length > 0, `author[0]=${(r.authors || [])[0] || '—'}`);
 fs.rmSync(out, { force: true });
+
+console.log('\n3. live web search — Tavily keyless (real network)');
+const wout = path.join(os.tmpdir(), 'll-cli-web-test-' + Date.now() + '.json');
+run(['Tavily Search API', '--per', '1', '--sources', 'web', '--json', '--out', wout]);
+const wj = JSON.parse(fs.readFileSync(wout, 'utf8'));
+const wq = Object.keys(wj.queries);
+const wrec = wj.queries[wq[0]]?.records?.[0] || {};
+ok('web source runs through --sources web', wj.sources.length === 1 && wj.sources[0] === 'web');
+ok('web record is labelled and carries URL + extracted text',
+   wrec.kind === 'web' && /^https?:\/\//.test(wrec.url) && typeof wrec.abstract === 'string' && wrec.abstract.length > 50,
+   `${wrec.host || 'no host'} · ${(wrec.abstract || '').length} chars`);
+fs.rmSync(wout, { force: true });
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

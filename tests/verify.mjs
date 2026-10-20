@@ -207,6 +207,36 @@ ok('merged records record their provenance', merged.some(r => r._also.length > 1
 const ids = merged.map(r => r.id);
 ok('no duplicate ids survive', new Set(ids).size === ids.length);
 
+/* ============ 2b. web search (live Tavily, keyless) ============ */
+head('2b. Web search (live Tavily, keyless)');
+ok('Web is enabled by default', LL.S.webEnabled === true && document.getElementById('src-web').checked === true,
+   `S.webEnabled=${LL.S.webEnabled} checkbox=${document.getElementById('src-web').checked}`);
+const WEBQ = 'Tavily Search API';
+const wr = await LL.searchWeb(WEBQ, { per: 3 }).catch(e => { console.log('   web err:', e.message); return []; });
+ok('Tavily keyless returns web records', wr.length >= 1, `${wr.length} records`);
+ok('web records are labelled, with URL, host and extracted text',
+   wr.every(r => r.kind === 'web' && r.url && r.host && r.abstract.length > 50),
+   wr[0] ? `${wr[0].host} · ${wr[0].abstract.length} chars` : 'none');
+ok('web text respects the per-result cap', wr.every(r => r.abstract.length <= LL.WEB_TEXT_CAP), `cap=${LL.WEB_TEXT_CAP}`);
+const wA = { id: 'web:a', url: 'https://example.com/a/?utm_source=x', title: 'A', score: 1, abstract: 'short', kind: 'web' };
+const wB = { ...wA, url: 'https://www.example.com/a/?utm_source=y', score: 2, abstract: 'a longer extract' };
+const wD = LL.dedupeWeb([wA, wB]);
+ok('web dedupe uses the canonical URL, not the title', wD.length === 1 && wD[0].score === 2, `${wD.length} record(s)`);
+const wRank = LL.rankWebResults('tavily api', [
+  { ...wA, id: 'web:low', url: 'https://low.example/x', score: 0.2, abstract: 'tavily api' },
+  { ...wA, id: 'web:high', url: 'https://high.example/y', score: 0.9, abstract: 'tavily api' }
+]);
+ok('web ranking puts provider relevance first', wRank[0].id === 'web:high', wRank.map(r => r.id).join(' → '));
+if (wr[0]) {
+  LL.ingestRecord(wr[0]);
+  const wctx = LL.buildContext('Tavily Search API', 'library');
+  ok('web context block is labelled not peer-reviewed and carries the URL',
+     /SOURCE: web page \(not peer-reviewed\)/.test(wctx.blocks) && wctx.blocks.includes(wr[0].url),
+     wctx.blocks.slice(0, 120).replace(/\n/g, ' '));
+}
+ok('a bad Tavily key gives an actionable error',
+   /Tavily rejected the key/.test(await LL.searchWeb(WEBQ, { per: 1, key: 'invalid-test-key' }).then(() => '').catch(e => e.message)));
+
 /* ============ 3. retrieval + context building ============ */
 head('3. Deterministic retrieval & prompt building');
 const paper = { id: 't1', title: 'Test paper on kangaroo gait', authors: ['Ada Lovelace', 'Grace Hopper'],
