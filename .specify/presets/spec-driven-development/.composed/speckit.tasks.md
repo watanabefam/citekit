@@ -56,6 +56,13 @@ Each non-trivial task carries its own Objective, requirement link, scope boundar
 **runnable Verification** line. If you cannot state how a task will be verified, it is not yet
 a task — it is an intention.
 
+### Name the recorded verification command
+
+A task's **Verification** line names the command recorded in the project's `## Commands` block in
+`AGENTS.md` — normally `./scripts/verify`. Do not invent a test invocation per task; the point of
+recording it once is that every task verifies the same way. If the block records the command as
+`unresolved`, say so in the Verification line and name what must be supplied, rather than guessing.
+
 ### Control scope
 
 Do not create tasks for unapproved future work, convenience features, or broad refactors that

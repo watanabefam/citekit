@@ -33,6 +33,24 @@ work cannot tell the difference.
 This is not a prohibition on noticing things. It is a requirement to record them where they can be
 found, instead of smuggling them into a change nobody approved.
 
+### Execute continuously, with a stopping condition
+
+Run the whole approved `tasks.md` **without pausing for confirmation between phases**. The per-phase
+checkpoint and any "proceed anyway?" prompt are removed from the happy path — record the decision in
+the ledger instead of asking. Routine implementation that follows the approved spec and passes local
+verification does not need a new gate.
+
+Stop only on one of:
+
+- **the execution budget** — 3 consecutive task failures (default). Halt, leave the failing tasks
+  unticked, and record the reason.
+- **an approval gate** — anything irreversible, external, costly, or destructive (the autonomy
+  contract's `Approval required` bucket).
+- **a missing credential or environment** you do not have.
+
+A passing task resets the consecutive-failure counter to 0. Commit per completed task and write its
+ledger line as it finishes, so a resumed run repeats nothing.
+
 ### Evidence before "done"
 
 You may **not** mark a task or feature complete because the code compiles, a single test
@@ -85,6 +103,16 @@ API consumers are 0-based, dates shift by one
 **At the start of a session, read the ledger first.** Check the identity line, resume at the
 first task without a `complete` line, and re-verify the named commits with `git log` before
 trusting them.
+
+**Do not reconstruct the resume point by hand — compute it:**
+
+```
+speckit-resume <spec-dir>
+```
+
+It reads `tasks.md` and `progress.md` and prints `RESUME T0xx` or `COMPLETE`. The rule is
+mechanical so that it cannot drift with interpretation: the ledger is authoritative, not the
+checkbox, and a task ticked without a `complete` line is not done.
 
 ### If reality contradicts the plan
 

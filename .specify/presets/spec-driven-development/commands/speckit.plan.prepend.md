@@ -23,6 +23,23 @@ ones — do not treat them as optional scaffolding.
 If a section genuinely does not apply, keep its heading and write
 `Not applicable — <reason>`. A generated plan missing preset sections is a defect.
 
+### When the core template itself marks a section removable
+
+The core template carries headings like `# [REMOVE IF UNUSED] Option 2: Web application`. Those
+markers are part of the resolved file, so the rule above and the markers can appear to disagree.
+They do not, and the markers win **for the sections they mark**:
+
+- A section the core template marks removable **may** be removed. Removing it is not a dropped
+  section, and the conformance check (`scripts/check-section-integrity.sh`) skips any heading
+  containing `[` for exactly this reason.
+- Every **appended** section carries no removal marker and therefore **always stays**.
+- Where removing an optional section would leave a gap, keep the pattern rather than leaving
+  silence: state the choice in the nearest required section (for a removed architecture option,
+  say which option this project uses and why, in `Scope Confirmation`).
+
+Do not read "the markers win" as licence to delete an appended section. The markers appear only in
+the core template; if a heading contains no `[`, it is required.
+
 ## Step rules
 
 ### Inspect the repository before proposing anything

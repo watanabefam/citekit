@@ -86,6 +86,10 @@ It carries the workflow, approval gates, traceability and verification rules.
 **The skill loads on roughly 60% of relevant requests — `/speckit` is the reliable path.** Invoke
 it when you need the workflow to apply for certain.
 
+**End every response with the four-bucket handoff** — Done (with evidence) · Continuing · Decision
+needed · Approval required — defined in `.opencode/autonomy-contract.md`. Reversible, in-scope work
+is autonomous; only the irreversible, external, or costly needs approval.
+
 ## Two rules that are enforced, not advised
 
 `.opencode/hook/hooks.yaml` (requires the `opencode-yaml-hooks` plugin) runs below the prompt layer,
@@ -106,6 +110,7 @@ reading the command prompt directly and following it as instructions:
 | Step | File |
 | --- | --- |
 | entry point | `.opencode/commands/speckit.md` |
+| fast lane (small work) | `.opencode/commands/speckit.quick.md` |
 | constitution | `.opencode/commands/speckit.constitution.md` |
 | specify | `.opencode/commands/speckit.specify.md` |
 | plan | `.opencode/commands/speckit.plan.md` |
@@ -118,8 +123,22 @@ reading the command prompt directly and following it as instructions:
 
 Substitute the user's feature description wherever the prompt expects `$ARGUMENTS`.
 <!-- SPECKIT-BRIDGE END -->
-
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
+at specs/001-web-search-source/plan.md
 <!-- SPECKIT END -->
+
+<!-- SPECKIT-COMMANDS START -->
+## Commands
+
+Detected for this project by `speckit-init`. Run `./scripts/verify` for test → lint → typecheck.
+
+| Purpose | Command |
+| --- | --- |
+| install | unresolved — set by hand, or re-run `speckit-init` after adding a manifest |
+| test | unresolved — set by hand, or re-run `speckit-init` after adding a manifest |
+| lint | unresolved — set by hand, or re-run `speckit-init` after adding a manifest |
+| typecheck | unresolved — set by hand, or re-run `speckit-init` after adding a manifest |
+| build | unresolved — set by hand, or re-run `speckit-init` after adding a manifest |
+<!-- SPECKIT-COMMANDS END -->

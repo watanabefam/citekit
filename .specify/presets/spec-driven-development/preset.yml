@@ -3,7 +3,7 @@ schema_version: "1.0"
 preset:
   id: "spec-driven-development"
   name: "Spec-Driven Development Addenda"
-  version: "1.11.0"
+  version: "1.13.0"
   description: "Appends problem framing, traceability, approval boundaries and verification sections to the core spec, plan and task templates without replacing them."
   author: "watanabefam"
   repository: "https://github.com/watanabefam/speckit-kit"
@@ -24,6 +24,18 @@ provides:
     # the instruction the agent actually follows, so the section-integrity rule lives
     # there. `prepend` composes with upstream command updates rather than replacing them
     # (verified: prepend inserts after the YAML frontmatter, preserving it).
+    # constitution goes FIRST because it is the first step, and because it carried no
+    # contribution at all until 1.13.0. The core command requires a Sync Impact Report and then
+    # expects it removed before commit, so an amendment's reasoning had no durable home: the
+    # constitution kept the RESULT and nothing kept the REASONING. A rule whose factual premise
+    # later goes stale therefore could not be detected — a failure with an established remedy
+    # (architecture decision records), which this contribution requires.
+    - type: "command"
+      name: "speckit.constitution"
+      file: "commands/speckit.constitution.prepend.md"
+      description: "Prepends the durable-decision-record rule: every amendment leaves a permanent, immutable, supersedable record carrying context, consequences, evidence and confidence, referenced from the constitution because the Sync Impact Report is scratch"
+      strategy: "prepend"
+
     - type: "command"
       name: "speckit.specify"
       file: "commands/speckit.specify.prepend.md"
@@ -49,7 +61,7 @@ provides:
     - type: "command"
       name: "speckit.implement"
       file: "commands/speckit.implement.prepend.md"
-      description: "Prepends the execution rules: approved work only, evidence before done, honest task ticking, repair the earliest artifact on contradiction"
+      description: "Prepends the execution rules: approved work only, continuous execution with an execution budget, evidence before done, honest task ticking, repair the earliest artifact on contradiction"
       strategy: "prepend"
 
     - type: "command"

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "*": "allow",
+    "bash": {
+      "*": "allow",
+      "git push*": "ask",
+      "git reset --hard*": "ask",
+      "git clean*": "ask",
+      "rm -rf*": "ask",
+      "psql*": "ask",
+      "kubectl delete*": "ask",
+      "terraform apply*": "ask",
+      "gh pr merge*": "ask",
+      "git push*--force*": "deny",
+      "git commit --no-verify*": "deny",
+      "git -c core.hooksPath=*": "deny",
+      "npm publish*": "deny",
+      "pnpm publish*": "deny",
+      "yarn publish*": "deny",
+      "cargo publish*": "deny",
+      "supabase db push*": "deny",
+      "supabase db reset*": "deny",
+      "prisma migrate reset*": "deny"
+    }
+  }
+}

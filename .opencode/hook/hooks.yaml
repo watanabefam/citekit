@@ -12,12 +12,12 @@
 # layer that actually holds — a hook runs regardless of what the model decides.
 #
 # It is deliberately tiny. A hook that is wrong about something urgent gets
-# removed, and then none of them work. Both hooks here are near-zero-false-positive
+# removed, and then none of them work. All four hooks here are near-zero-false-positive
 # and block only things that are wrong in essentially every case.
 #
 # Blocking contract (from the plugin): a bash action that exits 2 blocks the tool
-# call. `action: stop` additionally aborts the session — used here only for the
-# bypass hook, where continuing the session is not useful.
+# call. `action: stop` additionally aborts the session — used for the hooks where
+# continuing unattended is not useful (bypass, force-push, destructive).
 
 hooks:
   # ───────────────────────────────────────────────────────────────────────────
@@ -52,6 +52,10 @@ hooks:
             cmd=$(printf '%s' "$payload" | jq -r '.tool_args.command // empty' 2>/dev/null)
             [ -z "$cmd" ] && exit 0
 
+            # Strip quote characters first: a quoted flag ('--no-verify') survives
+            # tokenisation as "'--no-verify'" and would otherwise evade the walk.
+            cmd=$(printf '%s' "$cmd" | tr -d '\42\47')
+
             # BLOCK ANY git command that disables hook execution.
             #
             # Prior version anchored on `git commit`, which a whole bypass class
@@ -70,14 +74,21 @@ hooks:
             #   (c) a `commit` subcommand followed later by a `-n` arg.
             #       `-n` is ambiguous in isolation, so it only fires when a
             #       commit subcommand was seen.
+            # TWO PASSES, deliberately. A single pass that starts checking only
+            # after the first `git` token is defeated by any wrapper that puts
+            # tokens BEFORE it: `env core.hooksPath=/dev/null git commit -m x`
+            # walked straight past the old guard (verified by an adversarial
+            # probe, exit 0). Pass 1 asks "is there a git token at all"; pass 2
+            # checks every token, in any position.
             if awk '
               {
-                saw_git = 0; saw_commit = 0
+                has_git = 0
+                for (i = 1; i <= NF; i++) if ($i == "git") has_git = 1
+                if (!has_git) next
+                saw_commit = 0
                 for (i = 1; i <= NF; i++) {
                   t = $i
-                  if (t == "git")        { saw_git = 1; continue }
-                  if (!saw_git)           continue
-                  if (t == "--no-verify") { print "BLOCK"; exit }
+                  if (t == "--no-verify")      { print "BLOCK"; exit }
                   if (t ~ /^core\.hooksPath=/) { print "BLOCK"; exit }
                   if (t == "commit" || t == "commit-tree") { saw_commit = 1 }
                   if (saw_commit && t == "-n") { print "BLOCK"; exit }
@@ -131,22 +142,45 @@ hooks:
               *) exit 0 ;;
             esac
 
-            # Collect every path the call touches.
+            # Collect every path the call touches. Args are read from BOTH
+            # `.tool_args.*` (the shape this plugin actually sends — the bash
+            # guard reads `.tool_args.command`) and the root, because a
+            # multiedit-style payload nests its targets differently and an
+            # unlisted shape means the edit is silently unprotected.
             paths=$(printf '%s' "$payload" | jq -r '
               [ .tool_args.filePath?,
                 .tool_args.file_path?,
+                .tool_args.path?,
+                (.tool_args.changes[]?.path?),
+                (.tool_args.changes[]?.toPath?),
+                (.tool_args.files[]?.filePath?),
+                (.tool_args.files[]?.path?),
                 (.changes[]?.path?),
-                (.changes[]?.toPath?) ]
+                (.changes[]?.toPath?),
+                (.files[]?.filePath?),
+                (.files[]?.path?) ]
               | map(select(. != null and . != "")) | .[]' 2>/dev/null || true)
             [ -z "$paths" ] && exit 0
+
+            # DEFAULTED, deliberately. The plugin exports no OPENCODE_PROJECT_DIR
+            # (verified: only OPENCODE_CONFIG_CONTENT is in the environment), so
+            # `set -u` made this line abort with exit 1 — and the harness only
+            # treats exit 2 as blocking, so the whole guard failed OPEN and
+            # protected nothing. An absent variable must mean "no absolute
+            # prefix to strip", never "crash".
+            project_dir="${OPENCODE_PROJECT_DIR:-}"
 
             while IFS= read -r p; do
               [ -z "$p" ] && continue
               # normalise: strip a leading ./ and any absolute prefix up to the project dir
               case "$p" in
                 ./*) p="${p#./}" ;;
-                "$OPENCODE_PROJECT_DIR"/*) p="${p#"$OPENCODE_PROJECT_DIR"/}" ;;
               esac
+              if [ -n "$project_dir" ]; then
+                case "$p" in
+                  "$project_dir"/*) p="${p#"$project_dir"/}" ;;
+                esac
+              fi
               case "$p" in
                 .opencode/commands/speckit*.md \
                 | .specify/scripts/* \
@@ -157,6 +191,124 @@ hooks:
                   ;;
               esac
             done <<< "$paths"
+
+            exit 0
+          timeout: 10000
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 3. Force-push rewrites remote history.
+  #
+  # A permission glob cannot express this: `git push --force*` misses
+  # `git push origin main --force`, and a `-f` substring glob would false-positive
+  # on the benign `--follow-tags`. So it is token-based, like hook 1: walk the
+  # tokens, remember "we are past `git push`", and block the three unambiguous
+  # force signals — `-f`, `--force` / `--force-*`, and the `+<refspec>` prefix.
+  #
+  # `action: stop`: an unattended session that has just tried to rewrite remote
+  # history is not one to keep going.
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: block-force-push
+    event: tool.before.bash
+    action: stop
+    actions:
+      - bash:
+          command: |
+            set -euo pipefail
+            payload=$(cat)
+
+            # ZERO-FORK PREFILTER — no "push" token, allow immediately.
+            case "$payload" in
+              *push* ) : ;;
+              *) exit 0 ;;
+            esac
+
+            command -v jq >/dev/null 2>&1 || exit 0
+            cmd=$(printf '%s' "$payload" | jq -r '.tool_args.command // empty' 2>/dev/null)
+            [ -z "$cmd" ] && exit 0
+
+            # Strip quote characters first: a quoted flag ('-f') survives tokenisation
+            # as "'-f'" and would otherwise evade the walk.
+            cmd=$(printf '%s' "$cmd" | tr -d '\42\47')
+
+            if awk '
+              {
+                saw_git = 0; saw_push = 0
+                for (i = 1; i <= NF; i++) {
+                  t = $i
+                  if (t == "git")  { saw_git = 1; continue }
+                  if (!saw_git)    continue
+                  if (t == "push") { saw_push = 1; continue }
+                  if (!saw_push)   continue
+                  if (t == "-f" || t == "--force" || t ~ /^--force-/) { print "BLOCK"; exit }
+                  if (t ~ /^\+/) { print "BLOCK"; exit }
+                }
+              }
+            ' <<<"$cmd" | grep -q BLOCK; then
+              echo "BLOCKED: this is a force-push, which rewrites remote history. It is not available in this repo — if you believe history must change, say so and let a human run it." >&2
+              exit 2
+            fi
+
+            exit 0
+          timeout: 10000
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 4. Publishing a package and destroying a database are irreversible.
+  #
+  # Globs cannot express these: `supabase db push*` misses `npx supabase db push`,
+  # and `pnpm -r publish` misses `pnpm publish*`. So it is token-based, like hooks
+  # 1 and 3 — but with a segment guard: the package manager or CLI must be the
+  # FIRST token of a command segment (start, or after `&&`/`;`/`|`), so
+  # `grep -r npm publish .` is NOT a publish and is allowed.
+  # ───────────────────────────────────────────────────────────────────────────
+  - id: block-destructive-commands
+    event: tool.before.bash
+    action: stop
+    actions:
+      - bash:
+          command: |
+            set -euo pipefail
+            payload=$(cat)
+
+            # ZERO-FORK PREFILTER — no candidate token, allow immediately.
+            case "$payload" in
+              *publish*|*"db push"*|*"db reset"*|*"migrate reset"* ) : ;;
+              *) exit 0 ;;
+            esac
+
+            command -v jq >/dev/null 2>&1 || exit 0
+            cmd=$(printf '%s' "$payload" | jq -r '.tool_args.command // empty' 2>/dev/null)
+            [ -z "$cmd" ] && exit 0
+            cmd=$(printf '%s' "$cmd" | tr -d '\42\47')
+
+            if awk '
+              {
+                seg_start = 1; saw_pm = 0; saw_supabase = 0; saw_prisma = 0
+                saw_db = 0; saw_migrate = 0
+                for (i = 1; i <= NF; i++) {
+                  t = $i
+                  if (t == "&&" || t == ";" || t == "|" || t == "||") {
+                    seg_start = 1; saw_pm = 0; saw_supabase = 0; saw_prisma = 0
+                    saw_db = 0; saw_migrate = 0
+                    continue
+                  }
+                  # wrappers keep the segment at its start
+                  if (t == "sudo" || t == "env" || t == "time" || t == "command" || t == "npx" || t == "dlx") continue
+                  if (seg_start && (t == "npm" || t == "pnpm" || t == "yarn" || t == "cargo")) { saw_pm = 1; seg_start = 0; continue }
+                  if (seg_start && t == "supabase") { saw_supabase = 1; seg_start = 0; continue }
+                  if (seg_start && t == "prisma")   { saw_prisma = 1;   seg_start = 0; continue }
+                  seg_start = 0
+                  if (saw_pm && t == "publish") { print "BLOCK"; exit }
+                  if (saw_supabase && t == "db") { saw_db = 1; continue }
+                  if (saw_db && (t == "push" || t == "reset")) { print "BLOCK"; exit }
+                  if (saw_prisma && t == "db") { saw_db = 1; continue }
+                  if (saw_prisma && t == "migrate") { saw_migrate = 1; continue }
+                  if (saw_migrate && (t == "reset" || t == "deploy")) { print "BLOCK"; exit }
+                }
+              }
+            ' <<<"$cmd" | grep -q BLOCK; then
+              echo "BLOCKED: publishing a package or destroying a database is irreversible and is not available in this repo. If it is genuinely intended, say so and let a human run it." >&2
+              exit 2
+            fi
 
             exit 0
           timeout: 10000

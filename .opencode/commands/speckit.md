@@ -29,8 +29,9 @@ Then choose the **smallest workflow that gives sufficient confidence**.
 - has significant operational, reliability, or cost implications
 - was explicitly requested as a planned change
 
-**Short path** for a small, well-understood fix: state the cause, make the change, verify it.
-Applying full discovery to a typo is a failure, not diligence.
+**Short path** for a small, well-understood fix: run `/speckit.quick`. It states the cause, requires
+a failing test first for a defect, makes the smallest change, verifies, and logs one entry — no
+spec/plan/tasks artifacts. Applying full discovery to a typo is a failure, not diligence.
 
 > **State which workflow you picked and why** — one line. Do not skip this.
 
@@ -55,6 +56,7 @@ reconcile it with the spec rather than overwriting it.
 
 | If the work is | Run |
 | --- | --- |
+| small, well-understood, and reversible | `/speckit.quick` |
 | a first-time project, or principles are unset | `/speckit.constitution` (once) |
 | what and why | `/speckit.specify` |
 | how | `/speckit.plan` |
