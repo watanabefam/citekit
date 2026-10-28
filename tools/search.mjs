@@ -23,6 +23,7 @@
 // default, or --tavily-key / TAVILY_API_KEY / CITEKIT_TAVILY_KEY.
 import fs from 'node:fs';
 import { loadLL } from './load-ll.mjs';
+import { screenDois } from './fidelity.mjs';
 
 const KEYLESS = ['openalex', 'crossref', 'epmc', 'pubmed', 'eric', 'doaj'];
 const OPT_IN = ['s2', 'arxiv', 'core'];
@@ -43,6 +44,7 @@ function parseArgs(argv) {
     else if (a === '--md') o.md = true;
     else if (a === '--out') o.out = argv[++i];
     else if (a === '--no-enrich') o.enrich = false;
+    else if (a === '--no-screen') o.noScreen = true;
     else if (a === '--queries') o.queriesFile = argv[++i];
     else if (a === '--proxy') o.proxy = argv[++i];
     else if (a === '--openalex-key') o.openalexKey = argv[++i];
@@ -81,6 +83,7 @@ Flags
   --json | --md      output format (default: markdown to stdout)
   --out FILE         write output to FILE instead of stdout
   --no-enrich        skip the OpenAlex metadata-enrichment pass (saves metered OpenAlex calls)
+  --no-screen        skip the retraction screen (one batched OpenAlex call otherwise)
   --queries FILE     read a JSON array of strings or {q|query} objects
   --list-sources     print known sources and exit
 
@@ -134,7 +137,6 @@ async function main() {
 
   const opts = { oaOnly: o.oaOnly, yearFrom: o.yearFrom, per: o.per };
   const out = { generated: new Date().toISOString(), per: o.per, sources: chosen, queries: {} };
-
   for (const query of o.queries) {
     process.stderr.write(`\n## ${query}\n`);
     const settled = await Promise.allSettled(chosen.map(s => registry[s](query, opts)));
@@ -158,6 +160,41 @@ async function main() {
     out.queries[query] = { count: ranked.length, errors: errs, records: ranked };
   }
 
+  /* Retraction screen — one batched OpenAlex call across EVERY query in this run.
+     Probed: pipe-separated doi filter returns the whole set in one request at cost_usd 0.0001,
+     so screening costs one metered call regardless of how many results came back.
+     It answers a different question from the draft audit: not "is my claim faithful" but "is this
+     paper still standing". Neither substitutes for the other — the six real defects in the
+     document this tooling was built for involved no retracted work at all.
+     Never reported as "clean": a missing flag means no retraction ON RECORD. Coverage depends on
+     the publisher and on Retraction Watch's feed. */
+  if (!o.noScreen) {
+    const all = Object.values(out.queries).flatMap(q => q.records).filter(r => r.doi);
+    const dois = [...new Set(all.map(r => r.doi))];
+    if (dois.length) {
+      try {
+        const verdicts = await screenDois(dois);
+        let flagged = 0;
+        for (const q of Object.values(out.queries)) {
+          for (const r of q.records) {
+            const v = verdicts.get(String(r.doi || '').toLowerCase());
+            if (!v) continue;
+            r.retraction = { status: v.status, noticeType: v.noticeType, evidence: v.evidence };
+            if (v.status === 'retracted') flagged++;
+          }
+        }
+        out.screened = { at: new Date().toISOString(), dois: dois.length, retracted: flagged };
+        const hits = all.filter(r => r.retraction?.status === 'retracted');
+        if (hits.length) {
+          process.stderr.write(`\n\u26a0 ${hits.length} RETRACTED record(s) in these results:\n`);
+          for (const h of hits) process.stderr.write(`   ${h.doi}  ${(h.title || '').slice(0, 70)}\n`);
+        } else {
+          process.stderr.write(`   screened ${dois.length} DOIs: no retraction on record\n`);
+        }
+      } catch (e) { process.stderr.write(`   retraction screen unavailable: ${e.message}\n`); }
+    }
+  }
+
   const text = o.json ? JSON.stringify(out, null, 2) : toMarkdown(out);
   if (o.out) { fs.writeFileSync(o.out, text + '\n'); process.stderr.write(`\nwrote ${o.out}\n`); }
   else process.stdout.write(text + '\n');
@@ -171,14 +208,16 @@ function toMarkdown(out) {
     lines.push(`\n## ${query}`, `_${res.count} unique${res.errors.length ? ' · ' + res.errors.join(' | ') : ''}_\n`);
     for (const r of res.records) {
       const abs = (r.abstract || '').replace(/\s+/g, ' ').slice(0, 500);
-      lines.push(
+      lines.push(...[
         `### ${r.title || '(untitled)'} (${r.year || 'n.d.'})`,
         `**Authors:** ${authors(r)}`,
         `**Type:** ${r.kind === 'web' ? 'web page (not peer-reviewed)' : 'scholarly record'}`,
         `**Venue:** ${r.venue || '—'}  ·  **cited by:** ${r.citations || 0}  ·  **source:** ${r.source || '—'}${r.oa ? '  ·  **OA**' : ''}`,
         `**DOI:** ${r.doi || '—'}${r.url ? `  ·  ${r.url}` : ''}${r.pdf ? `\n**PDF:** ${r.pdf}` : ''}`,
-        abs ? `\n${abs}` : '\n_[no abstract]_', ''
-      );
+        r.retraction?.status === 'retracted' ? `**\u26a0 RETRACTED** \u2014 do not cite (detected via ${r.retraction.evidence.join(', ')})` : '',
+        r.retraction?.status === 'is-a-notice' ? '**Notice of retraction** \u2014 this record is the notice, not the retracted work' : '',
+        abs ? `\n${abs}` : '\n_[no abstract]_', '',
+      ].filter(x => x !== ''));
     }
   }
   return lines.join('\n');

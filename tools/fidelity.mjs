@@ -346,15 +346,210 @@ export function auditDraft(markdown) {
   return { considered, hard, warn, advisory, flagged: hard.length + warn.length + advisory.length };
 }
 
+/* ============================ 5. claim ledger ============================ */
+
+// A ledger of what you actually read, per claim. The control the draft audit cannot be:
+// the audit catches claims that ANNOUNCE they are second-hand; the ledger catches claims that
+// are second-hand quietly, which is how "median 66 days" (body text, abstract read) and an
+// unverified effect size both got in.
+//
+// Vocabulary borrowed from two places, deliberately:
+//   - SEPIO (Scientific Evidence and Provenance Information Ontology): an assertion's identity is
+//     (proposition, agent, occasion) — so a record carries who asserted it and when. And evidence
+//     is counted in EVIDENCE LINES, not citations: two claims drawn from one paper are one line.
+//     That is the false-corroboration error in the document this tooling came from, where
+//     "Hansen, the Pew figures and Dollahite" read as three supports and was one paper read.
+//   - SciFact / SCIVER (Wadden et al., EMNLP 2020): the verdict vocabulary is
+//     SUPPORTS / REFUTES / NOT_ENOUGH_INFO. Its leaderboard tops out near 46% F1, so this tool
+//     never predicts a verdict. It records the one a human made, and refuses to accept a
+//     "supports" on evidence that was never opened.
+
+// Ordered worst-last. `full-text` means the work's own body was read.
+export const ACCESS = ['full-text', 'abstract', 'via-secondary', 'not-read'];
+const ACCESS_RANK = { 'full-text': 3, abstract: 2, 'via-secondary': 1, 'not-read': 0 };
+
+export const VERDICTS = ['supports', 'refutes', 'not-enough-info', 'unclear'];
+
+export function normaliseClaim(s) {
+  // Identity must not depend on case, spacing or punctuation: "claim" and "Claim!" are the same
+  // proposition, and a key that changes when a full stop is added cannot be looked up.
+  return String(s || '')
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N} ]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function claimKey(s) {
+  const n = normaliseClaim(s);
+  let h1 = 0x811c9dc5, h2 = 0x01000193;
+  for (let i = 0; i < n.length; i++) {
+    h1 ^= n.charCodeAt(i); h1 = Math.imul(h1, 16777619) >>> 0;
+    h2 = (h2 * 31 + n.charCodeAt(i)) >>> 0;
+  }
+  return (h1.toString(16) + h2.toString(16)).slice(0, 12);
+}
+
+// Build a record. Defaults are deliberately conservative: access defaults to the WORST truthful
+// value, so forgetting to state it fails closed rather than open.
+export function ledgerRecord({
+  claim, source = {}, access = 'not-read', via = null,
+  verdict = 'unclear', loadBearing = false, agent = 'draft', at = null,
+} = {}) {
+  if (!ACCESS.includes(access)) throw new Error(`access must be one of ${ACCESS.join(' | ')}`);
+  if (!VERDICTS.includes(verdict)) throw new Error(`verdict must be one of ${VERDICTS.join(' | ')}`);
+  const evidenceLine = source.evidenceLine
+    || source.doi
+    || [source.authorYear, source.year].filter(Boolean).join('-')
+    || null;
+  return {
+    key: claimKey(claim),
+    claim: String(claim || '').trim(),
+    asserted_by: agent,
+    asserted_at: at || new Date().toISOString(),
+    source: {
+      doi: source.doi || null,
+      author_year: source.authorYear || null,
+      title: source.title || null,
+    },
+    access,
+    via: via || null,                   // the secondary you actually read, if access is via-secondary
+    evidence_line: evidenceLine,        // SEPIO: claims from one work are ONE line of evidence
+    verdict,
+    load_bearing: !!loadBearing,
+  };
+}
+
+// Author-year pairs cited in a draft, for the cited-but-never-read check.
+export function citedAuthorYears(markdown = '') {
+  const out = [];
+  const seen = new Set();
+  const text = String(markdown).replace(/`[^`]*`/g, ' ').replace(/\s+/g, ' ');
+  for (const m of text.matchAll(CITE_SCHOLAR)) {
+    if (NOT_A_NAME.has(m[1])) continue;
+    const name = m[1].replace(/^the\s+/i, '').trim();
+    if (!/[A-Za-z]{3,}/.test(name)) continue;
+    const key = `${name} ${m[2]}`.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ name, year: m[2], label: `${name} ${m[2]}` });
+  }
+  return out;
+}
+
+// The gate. Pure: entries + optional draft text in, findings out.
+export function auditLedger(entries = [], { draft = '' } = {}) {
+  const failures = [], warnings = [];
+  const fail = (e, why) => failures.push({ level: 'FAIL', why, claim: e.claim, source: e.source });
+  const warn = (e, why) => warnings.push({ level: 'WARN', why, claim: e.claim, source: e.source });
+
+  for (const e of entries) {
+    const rank = ACCESS_RANK[e.access] ?? 0;
+
+    // 1. cited but never accessed — the "Hansen 1998" class
+    if (e.access === 'not-read') {
+      fail(e, 'access is "not-read": cited without being opened at all');
+      continue;
+    }
+
+    // 2. a figure stated from less than the full text — the "median 66 days" class
+    if (FIGURE.test(e.claim) && rank < ACCESS_RANK['full-text']) {
+      fail(e, `states a figure but access is "${e.access}" (a figure needs the work's own body)`);
+    }
+
+    // 3. load-bearing and read only through someone else's summary — the Dollahite class
+    if (e.load_bearing && e.access === 'via-secondary') {
+      fail(e, `load-bearing but seen only via ${e.via || 'a secondary'}`);
+    }
+
+    // 4. a verdict you could not have reached from an abstract
+    if (e.verdict === 'supports' && rank < ACCESS_RANK['full-text']) {
+      warn(e, `verdict "supports" recorded on access "${e.access}"`);
+    }
+
+    // 5. via-secondary without naming the secondary is untraceable
+    if (e.access === 'via-secondary' && !e.via) {
+      fail(e, 'access is "via-secondary" but no secondary is named');
+    }
+  }
+
+  // 6. cited in the draft but absent from the ledger. This is a COMPLETENESS backlog, not a list of
+  // errors, and conflating the two makes the gate unusable: a draft cites dozens of works and a
+  // young ledger accounts for few. Reported separately, and it only fails a build with
+  // --strict-incomplete. The substantive failures are checks 1-5.
+  const unaccounted = [];
+  if (draft) {
+    const known = new Set(entries.flatMap(e => [
+      String(e.source?.author_year || '').toLowerCase(),
+      [e.source?.author_year, e.source?.title].filter(Boolean).join(' ').toLowerCase(),
+    ]).filter(Boolean));
+    const knownNames = [...known].join(' ');
+    for (const c of citedAuthorYears(draft)) {
+      const hit = known.has(c.label.toLowerCase()) || knownNames.includes(c.label.toLowerCase());
+      if (!hit) unaccounted.push({ label: c.label });
+    }
+  }
+
+  // SEPIO: corroboration is counted in evidence lines, not citations.
+  const lines = new Set(entries.map(e => e.evidence_line).filter(Boolean));
+  const readByMe = new Set(entries.filter(e => ACCESS_RANK[e.access] >= ACCESS_RANK['full-text']).map(e => e.evidence_line).filter(Boolean));
+
+  return {
+    failures, warnings, unaccounted,
+    stats: {
+      claims: entries.length,
+      evidenceLines: lines.size,
+      evidenceLinesReadAtFullText: readByMe.size,
+      viaSecondary: entries.filter(e => e.access === 'via-secondary').length,
+      loadBearing: entries.filter(e => e.load_bearing).length,
+      unaccounted: unaccounted.length,
+    },
+  };
+}
+
+/* ============================ 6. how a paper is actually cited ============================ */
+
+// Semantic Scholar returns `contexts` — the verbatim sentences in which a citing paper refers to
+// this one — plus `intents`. Probed keyless on 2026-10-29: no key or proxy needed for this
+// endpoint. Useful for asking "is this paper commonly misquoted?" before relying on it; it is a
+// research aid, not a gate, because a wrong citation elsewhere says nothing about your own.
+export async function citationContexts(doi, { limit = 8, s2Key = process.env.CITEKIT_S2_KEY || '' } = {}) {
+  const d = strip(doi);
+  if (!d) return [];
+  const url = `https://api.semanticscholar.org/graph/v1/paper/DOI:${encodeURIComponent(d)}`
+    + `/citations?fields=contexts,intents,isInfluential,title,year&limit=${limit}`;
+  let json;
+  try {
+    json = await getJSON(url, 20000, s2Key ? { 'x-api-key': s2Key } : {});
+  } catch (e) {
+    // Probed 2026-10-29: this endpoint answers keyless, but the anonymous pool rate-limits to 429
+    // within a few calls — the same shared-pool limit already documented for the app's S2 adapter.
+    // Say so, rather than surfacing a bare HTTP 429.
+    if (/429/.test(e.message)) {
+      throw new Error('Semantic Scholar rate-limited (HTTP 429, anonymous pool). '
+        + 'Set CITEKIT_S2_KEY for a dedicated 1 rps quota, or retry later.');
+    }
+    throw e;
+  }
+  return (json?.data || []).map(c => ({
+    citingTitle: c.citingPaper?.title || null,
+    year: c.citingPaper?.year || null,
+    intents: c.intents || [],
+    influential: !!c.isInfluential,
+    contexts: c.contexts || [],
+  }));
+}
+
 /* ============================ network layer ============================ */
 
 const strip = d => String(d || '').replace(/^https?:\/\/(dx\.)?doi\.org\//i, '').trim();
 
-async function getJSON(url, timeoutMs = 20000) {
+async function getJSON(url, timeoutMs = 20000, headers = {}) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { signal: ctl.signal, headers: { Accept: 'application/json' } });
+    const res = await fetch(url, { signal: ctl.signal, headers: { Accept: 'application/json', ...headers } });
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
     return await res.json();
@@ -497,6 +692,85 @@ async function main() {
       process.exit(1);
     }
     return;
+  }
+
+  if (cmd === 'cite') {
+    const doi = args[1];
+    if (!doi) { console.error('usage: node tools/fidelity.mjs cite <DOI>'); process.exit(2); }
+    const rows = await citationContexts(doi, { limit: 8 });
+    if (!rows.length) { console.log('no citation contexts returned (Semantic Scholar may not index this DOI)'); return; }
+    console.log(`How this work is cited by others (${rows.length}):\n`);
+    for (const r of rows) {
+      console.log(`\u2022 ${r.citingTitle || '(untitled)'}${r.year ? ` (${r.year})` : ''}` +
+        `${r.intents.length ? `  [${r.intents.join(',')}]` : ''}${r.influential ? '  *influential*' : ''}`);
+      for (const c of r.contexts) console.log(`    \u201c${c.replace(/\s+/g, ' ').slice(0, 220)}\u201d`);
+    }
+    return;
+  }
+
+  if (cmd === 'claim') {
+    const fs = await import('node:fs');
+    const sub = args[1];
+    const get = (name, dflt = '') => {
+      const i = args.indexOf('--' + name);
+      return i >= 0 && args[i + 1] && !args[i + 1].startsWith('--') ? args[i + 1] : dflt;
+    };
+    const has = name => args.includes('--' + name);
+    const ledgerPath = get('ledger', get('draft') ? get('draft') + '.claims.jsonl' : 'claims.jsonl');
+    const read = () => fs.existsSync(ledgerPath)
+      ? fs.readFileSync(ledgerPath, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))
+      : [];
+
+    if (sub === 'add') {
+      const claim = get('text');
+      if (!claim) { console.error('usage: node tools/fidelity.mjs claim add --text "..." [--doi D] [--author-year "X 2019"] --access full-text|abstract|via-secondary|not-read [--via S] [--load-bearing] [--verdict supports|refutes|not-enough-info|unclear] [--ledger F]'); process.exit(2); }
+      let rec;
+      try {
+        rec = ledgerRecord({
+          claim,
+          source: { doi: get('doi'), authorYear: get('author-year'), title: get('title'), evidenceLine: get('evidence-line') },
+          access: get('access', 'not-read'),
+          via: get('via') || null,
+          verdict: get('verdict', 'unclear'),
+          loadBearing: has('load-bearing'),
+          agent: get('agent', get('draft') || 'draft'),
+        });
+      } catch (e) { console.error(e.message); process.exit(2); }
+      fs.appendFileSync(ledgerPath, JSON.stringify(rec) + '\n');
+      console.log(`added ${rec.key}  access=${rec.access}  line=${rec.evidence_line || '\u2014'}`);
+      return;
+    }
+
+    if (sub === 'list' || sub === 'check') {
+      const entries = read();
+      if (!entries.length) { console.log(`no ledger at ${ledgerPath}`); return; }
+      if (sub === 'list') {
+        for (const e of entries) {
+          console.log(`${e.key}  ${e.access.padEnd(13)} ${String(e.verdict).padEnd(14)} ${e.load_bearing ? 'LOAD-BEARING ' : ''}${e.source?.author_year || e.source?.doi || '\u2014'}`);
+          console.log(`            ${e.claim.replace(/\s+/g, ' ').slice(0, 150)}`);
+        }
+        return;
+      }
+      const draftPath = get('draft');
+      const draft = draftPath && fs.existsSync(draftPath) ? fs.readFileSync(draftPath, 'utf8') : '';
+      const r = auditLedger(entries, { draft });
+      console.log(`${r.stats.claims} claims \u00b7 ${r.stats.evidenceLines} evidence lines \u00b7 ${r.stats.evidenceLinesReadAtFullText} read at full text \u00b7 ${r.stats.viaSecondary} via secondary\n`);
+      for (const f of r.failures) console.log(`  FAIL  ${f.why}\n        ${f.claim ? f.claim.replace(/\s+/g, ' ').slice(0, 130) : ''}`);
+      for (const w of r.warnings) console.log(`  WARN  ${w.why}\n        ${w.claim ? w.claim.replace(/\s+/g, ' ').slice(0, 130) : ''}`);
+      if (!r.failures.length) console.log('  no failures');
+      if (draftPath) {
+        console.log(`\n  ${r.unaccounted.length} citation(s) in the draft have no ledger entry ` +
+          `\u2014 a completeness backlog, not errors.`);
+        for (const u of r.unaccounted.slice(0, 12)) console.log(`    \u00b7 ${u.label}`);
+        if (r.unaccounted.length > 12) console.log(`    \u2026 and ${r.unaccounted.length - 12} more`);
+      }
+      if (has('strict') && r.failures.length) process.exit(1);
+      if (has('strict-incomplete') && r.unaccounted.length) process.exit(1);
+      return;
+    }
+
+    console.error('usage: node tools/fidelity.mjs claim add|list|check ...');
+    process.exit(2);
   }
 
   console.log(`fidelity — citation-integrity checks

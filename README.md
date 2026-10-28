@@ -336,7 +336,9 @@ node tests/fidelity.mjs [--live]                           # 55 assertions, 3 li
 the suite needs no network except the three `--live` probes.
 
 1. **Retraction** — `classifyRetraction({crossref, openalex})`. Three signals, because no single one
-   is sufficient (see the probe table below).
+   is sufficient (see the probe table below). Runs on **every `tools/search.mjs` run** by default:
+   one batched OpenAlex call screens every DOI across every query, and flags hits inline with
+   `⚠ RETRACTED`. `--no-screen` skips it.
 2. **Attribution** — `detectAttributions(abstract)`. Does this abstract report *other people's*
    findings? Handles the scholarly form ("Bengtson et al. 2013") **and** the institutional form
    ("the Pew Research Center found"), which has no year and was how four of the six defects entered.
@@ -351,6 +353,43 @@ the suite needs no network except the three `--live` probes.
 | **HARD** | relay marker — "as reported by", "quoted in", "summarised in", "according to \<named source\>" | Yes, under `--strict` |
 | **WARN** | two or more *separate* parenthetical citation groups (the "X says Y found Z" shape). One parenthetical with a semicolon list is a citation list, not a relay | No |
 | **ADVISORY** | a cited figure; a synthesis narrowed to a specific cause; declared provenance | No |
+
+And a **claim ledger** for the class the audit cannot reach — claims that are second-hand *quietly*:
+
+```bash
+node tools/fidelity.mjs claim add --text "median 66 days to asymptote" \
+     --author-year "Lally 2010" --access abstract --ledger doc.claims.jsonl
+node tools/fidelity.mjs claim check --ledger doc.claims.jsonl --draft doc.md
+node tools/fidelity.mjs cite 10.3102/0034654321991228     # how others actually cite it
+```
+
+| Access | Means |
+|---|---|
+| `full-text` | the work's own body was read |
+| `abstract` | only the abstract |
+| `via-secondary` | never opened; read a summary of it inside another work (`--via "Dollahite 2019"`) |
+| `not-read` | cited anyway — **the default, so forgetting fails closed** |
+
+`claim check` fails on five things: `not-read`; a claim carrying a **figure** at anything below
+full text (the "median 66 days" class — the figure was in the body, the abstract was read); a
+**load-bearing** claim seen only `via-secondary` (the Dollahite class); `via-secondary` with no
+secondary named; and, as a WARN, a `supports` verdict recorded on an abstract.
+
+**Corroboration is counted in evidence lines, not citations** — from SEPIO, whose model makes an
+assertion's identity depend on proposition, agent and occasion, and whose evidence model is built
+around distinct lines of inquiry. Two claims drawn from one paper are **one** line. The stats line
+prints that ratio, and it is the number that exposed the real error in the document this came from:
+six claims, six citations, **one** read at full text.
+
+Citations present in the draft but absent from the ledger are reported as a **completeness backlog,
+not failures** — 52 of them on a real draft, which as "errors" would make the gate useless. Only
+`--strict-incomplete` fails on those.
+
+**What the ledger cannot do.** It records a verdict; it never predicts one. SciFact/SCIVER (Wadden
+et al., EMNLP 2020) is the reference task for claim verification, and its leaderboard tops out near
+**46% F1** — a coin-flip for three-way SUPPORTS/REFUTES/NOT-ENOUGH-INFO. An automated verdict here
+would be worse than no tool, because it would be believed. It also only helps if it is filled in:
+it is a discipline aid, not a detector.
 
 **Declared provenance downgrades rather than silences.** A sentence saying "second-hand",
 "abstract only", "not read" or "reported-not-verified" moves from HARD to ADVISORY: it is still
@@ -368,6 +407,7 @@ saying how far it was verified.
 | Wakefield notice (`10.1016/S0140-6736(10)60175-4`) | Crossref `update-to: [{type:'retraction', source:'retraction-watch'}]`; OpenAlex `type: 'retraction'` **and** `is_retracted: true` | `update-to` lives on the **notice**, not the work. And `is_retracted` is **ambiguous**: on a notice it means "this is a notice". Type disambiguates; without that branch the tool reports a retraction notice as a retracted work |
 | OpenAlex batch `filter=doi:a\|b\|c&select=doi,type,is_retracted` | 3 DOIs, one call, `cost_usd: 0.0001` | Screen a 20-result search in **one** metered call, then fetch Crossref detail only for hits |
 | OpenAlex `type` on a known review | `review` (vs `article`) | Claim scope is read from metadata rather than inferred from the title |
+| Semantic Scholar `/paper/DOI:…/citations?fields=contexts` | Works keyless, returns the verbatim citing sentences — but the anonymous pool 429s within a few calls | `cite` is best-effort; the error names `CITEKIT_S2_KEY` rather than surfacing a bare 429 |
 
 ### What it cannot do
 
@@ -375,9 +415,11 @@ saying how far it was verified.
   source before the claim is load-bearing. On the six real defects it satisfies: **HARD 2/6, any
   level 6/6** — asserted in the suite, so a change that quietly improves or degrades recall fails
   the test rather than passing unnoticed.
-- **The confidence class needs a different control.** "Median 66 days" and an unverified effect size
-  are not attribution errors; no relay marker marks them. The ADVISORY figure check is a prompt, not
-  a solution — a `{claim, source, access: abstract|fulltext}` ledger is the actual fix and is not built.
+- **The confidence class needs the ledger, and the ledger needs you.** `claim check` catches
+  "median 66 days" and an unverified effect size *if they are entered with an honest access level*.
+  Nothing forces that; it is a discipline aid, not a detector. A ledger left empty passes silently.
+- **Verdicts are recorded, never predicted.** See the SciFact note above: ~46% F1 makes an automatic
+  SUPPORTS/REFUTES/NOT_ENOUGH_INFO worse than useless.
 - **Abstracts are not papers.** Dollahite et al.'s abstract attributes to one source (Pew); its
   *body* also summarised Bengtson, Lee, Hansen and Vermeer. Abstract-level detection cannot reach
   the body, which is where half the errors lived.
@@ -549,12 +591,9 @@ Rule of thumb: assemble if you mostly need *reading and citing*; keep this file 
    URL into Settings → Proxy URL. Built and verified locally against the real workerd runtime;
    only the deploy needs an account. While there: `wrangler secret put S2_KEY` and `CORE_KEY`
    so the two key-gated sources actually work.
-1b. **An access-level ledger for the confidence class.** `tools/fidelity.mjs` catches the
-   *attribution* class but cannot catch a figure stated with more certainty than its source
-   ("median 66 days" from a body the author never read). The missing piece is `--claim "{text}"
-   --source <DOI>` appending `{claim, source, access: abstract|fulltext}` to a ledger, and a check
-   that fails when a claim marked load-bearing sits at `access: abstract`. Until that exists, the
-   ADVISORY figure prompt is the only cover.
+1b. ~~An access-level ledger for the confidence class~~ — **built** as `claim add|list|check`. Still
+   missing: a pre-commit hook, and any way to reconcile a ledger against a *changed* draft (edit a
+   claim and its `key` no longer matches, so the entry silently stops applying).
 2. A real screen-reader pass (VoiceOver/NVDA). The automated assertions cover roles, live regions,
    focus order and keyboard operability, but no screen reader has actually been driven.
 3. IndexedDB library with per-paper embeddings for large corpora.

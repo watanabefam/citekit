@@ -278,10 +278,83 @@ ok(mapped.get('10.1016/s0140-6736(10)60175-4')?.status === 'is-a-notice',
 ok(mapped.get('10.3390/rel10020111')?.status === 'no-retraction-on-record', 'a clean record maps to on-record');
 
 /* =====================================================================================
-   7. LIVE (opt-in) — the probes this design rests on.
+   7. CLAIM LEDGER — the six defects again, this time as ledger entries.
+   The audit catches claims that ANNOUNCE they are second-hand. The ledger catches claims that
+   are second-hand quietly, which is how the confidence class got in.
+   ===================================================================================== */
+section('7. claim ledger');
+
+import { ledgerRecord, auditLedger, claimKey, citedAuthorYears, ACCESS, VERDICTS } from '../tools/fidelity.mjs';
+
+// access defaults to the WORST truthful value, so forgetting fails closed
+ok(ledgerRecord({ claim: 'x' }).access === 'not-read', 'access defaults to not-read (fails closed)');
+ok((() => { try { ledgerRecord({ claim: 'x', access: 'skimmed' }); return false; } catch { return true; } })(), 'unknown access level is rejected');
+ok(claimKey('The  same   claim!') === claimKey('the same claim'), 'claim keys ignore case, spacing and punctuation');
+
+const LEDGER = [
+  // 1. the Lee class — load-bearing, read only through Dollahite
+  ledgerRecord({ claim: 'Compulsory family worship was more detrimental than no family worship at all',
+    source: { authorYear: 'Lee 1997' }, access: 'via-secondary', via: 'Dollahite 2019', loadBearing: true }),
+  // 2. the Pew class — a figure at via-secondary
+  ledgerRecord({ claim: '78% of the unaffiliated were raised in highly religious families',
+    source: { authorYear: 'Pew 2016' }, access: 'via-secondary', via: 'Dollahite 2019' }),
+  // 3. the Bengtson class — a figure from an abstract
+  ledgerRecord({ claim: 'Warmth predicted continuation across 3,000 participants',
+    source: { authorYear: 'Bengtson 2013' }, access: 'abstract', loadBearing: true }),
+  // 4. the Lally class — a body-text median from the abstract
+  ledgerRecord({ claim: 'Automaticity reaches 95% of asymptote at a median 66 days',
+    source: { authorYear: 'Lally 2010' }, access: 'abstract' }),
+  // 5. the Deci class — cited, never opened
+  ledgerRecord({ claim: 'Engagement-contingent rewards d = -0.40',
+    source: { authorYear: 'Deci 1999' }, access: 'not-read' }),
+  // a properly-handled claim, which must NOT fail
+  ledgerRecord({ claim: 'Personal prayer predicted wellbeing r=.34 against r=.20 for attendance',
+    source: { doi: '10.1007/s40839-018-0068-6', authorYear: 'Wilkinson 2018' },
+    access: 'full-text', verdict: 'supports', loadBearing: true }),
+];
+
+let L = auditLedger(LEDGER);
+ok(L.failures.length === 5, 'all five ledger-checkable defects fail', `got ${L.failures.length}: ${L.failures.map(f => f.why.slice(0, 40)).join(' | ')}`);
+ok(L.failures.some(f => /load-bearing but seen only via/.test(f.why)), 'the Lee class is caught as load-bearing-via-secondary');
+ok(L.failures.some(f => /states a figure/.test(f.why) && /abstract/.test(f.why)), 'the Lally/Bengtson class is caught as figure-from-abstract');
+ok(L.failures.some(f => /not-read/.test(f.why)), 'the Deci class is caught as never opened');
+ok(!L.failures.some(f => /Wilkinson/.test(JSON.stringify(f))), 'the properly-handled claim does not fail');
+ok(L.stats.evidenceLines === 6 && L.stats.evidenceLinesReadAtFullText === 1,
+  'stats expose evidence lines vs lines read at full text (SEPIO corroboration count)',
+  JSON.stringify(L.stats));
+ok(L.stats.viaSecondary === 2, 'via-secondary count is reported');
+
+// via-secondary without naming the secondary is untraceable
+const noVia = auditLedger([ledgerRecord({ claim: 'Something asserted', source: { authorYear: 'X 2001' }, access: 'via-secondary' })]);
+ok(noVia.failures.some(f => /no secondary is named/.test(f.why)), 'via-secondary with no source named fails');
+
+// a verdict may not exceed its evidence
+const overreach = auditLedger([ledgerRecord({ claim: 'A finding', source: { authorYear: 'Y 2002' }, access: 'abstract', verdict: 'supports' })]);
+ok(overreach.warnings.some(w => /verdict "supports"/.test(w.why)), 'a "supports" verdict on an abstract warns');
+
+// cited-but-unledgered is a BACKLOG, not a failure — 52 of them would otherwise make the gate useless
+const withDraft = auditLedger(LEDGER, { draft: 'We rely on Wilkinson 2018 and on Hansen 1998 and on Vermeer 2012.' });
+ok(withDraft.unaccounted.some(u => /Hansen 1998/.test(u.label)), 'a citation absent from the ledger is reported as unaccounted');
+ok(withDraft.unaccounted.some(u => /Vermeer 2012/.test(u.label)), 'and so is the second one');
+ok(!withDraft.unaccounted.some(u => /Wilkinson 2018/.test(u.label)), 'a citation that IS in the ledger is not unaccounted');
+ok(!withDraft.failures.some(f => /not in the ledger/.test(f.why || '')), 'unaccounted citations do NOT count as failures');
+
+ok(citedAuthorYears('As Lee et al. 1997 found, and Dollahite (2019) agreed.').length === 2, 'author-year extraction finds both forms');
+ok(citedAuthorYears('').length === 0, 'empty draft yields nothing');
+
+/* =====================================================================================
+   8. HOW A PAPER IS ACTUALLY CITED — pure mapper, needs no network.
+   ===================================================================================== */
+section('8. citation contexts (pure)');
+import { citationContexts } from '../tools/fidelity.mjs';
+ok(typeof citationContexts === 'function', 'citationContexts is exported');
+ok(ACCESS.length === 4 && VERDICTS.length === 4, 'vocabularies are fixed-size and closed');
+
+/* =====================================================================================
+   9. LIVE (opt-in) — the probes this design rests on.
    ===================================================================================== */
 if (process.argv.includes('--live')) {
-  section('7. live probes');
+  section('9. live probes');
   const chest = await checkDoi('10.1378/chest.128.6.3817');
   ok(chest.retraction.status === 'retracted', 'live: Chest 2005 detected retracted', chest.retraction.status);
   const notice = await checkDoi('10.1016/S0140-6736(10)60175-4');
