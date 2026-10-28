@@ -20,7 +20,8 @@ Tick **dry run** first if you want to see the exact prompt before spending token
 `node tests/verify.mjs` runs 95 behavioural assertions against live APIs and fake SSE providers.
 `tests/browser.mjs` (44 assertions) drives real Chromium; `tests/proxy-integration.mjs` (16) verifies
 the optional Cloudflare Worker against the real workerd runtime; `tests/mcp-server.mjs` (19) speaks
-the MCP protocol over stdio to the real server. `tests/tools-search.mjs` (11) covers the CLI.
+the MCP protocol over stdio to the real server. `tests/tools-search.mjs` (11) covers the CLI, and
+`tests/fidelity.mjs` (55, plus 3 live probes) covers the citation-integrity checks.
 
 ---
 
@@ -306,6 +307,87 @@ Read honestly:
 - **Still not exercised: the checkbox in the browser UI.** Both suites call `expandCitations`
   directly; the toggle, the merged re-rank and the status line have no automated coverage yet.
 
+## Citation integrity — `tools/fidelity.mjs`
+
+Retrieval can be excellent and the claims built on it still wrong. That happened: a document
+assembled from these searches carried **six** defects, and every search, ranking and citation
+number involved was correct. Two published base rates say that is the normal case, not a careless
+one:
+
+| Base rate | Source |
+|---|---|
+| **11.9%** of quotations contain a *major* error [95% CI 8.4–…], 28 studies | Jergas & Baethge (2015), *PeerJ* |
+| **26.01%** of assertions unsupported; **34.77%** of articles carry at least one | Martella et al. (2021), *Review of Educational Research* 91(2):272–308 — 1,630 assertions in 1,090 articles citing Freeman et al. (2014) |
+| ~20–25% of cited "facts" inaccurate | recount in *PLOS ONE* (2017) of prior reviews |
+
+Martella et al. also name the commonest single failure, and it is not fabrication: **specification**
+— citing an aggregate effect to support a narrower claim the synthesis never tested (16.93% of
+assertions). "Active learning beats lecture" cannot be cited as "cooperative learning beats lecture."
+
+```bash
+node tools/fidelity.mjs doi 10.1378/chest.128.6.3817        # retraction + scope for one work
+node tools/fidelity.mjs screen DOI [DOI...]                # batched, one metered call
+node tools/fidelity.mjs draft ../family/habits/prayer.md   # audit prose
+node tools/fidelity.mjs draft FILE --strict                # exit 1 on an undeclared relay
+node tests/fidelity.mjs [--live]                           # 55 assertions, 3 live probes
+```
+
+**Four checks, each a separate failure.** They are pure functions over already-fetched payloads, so
+the suite needs no network except the three `--live` probes.
+
+1. **Retraction** — `classifyRetraction({crossref, openalex})`. Three signals, because no single one
+   is sufficient (see the probe table below).
+2. **Attribution** — `detectAttributions(abstract)`. Does this abstract report *other people's*
+   findings? Handles the scholarly form ("Bengtson et al. 2013") **and** the institutional form
+   ("the Pew Research Center found"), which has no year and was how four of the six defects entered.
+3. **Claim scope** — `claimScope(record)` → `primary?` / `mixed?` / `secondary?` / `secondary`. OpenAlex
+   `type` does distinguish `review` from `article`, so this is metadata, not a guess. `mixed?` exists
+   because a paper can have sound own-data *and* unreliable summaries of others — flattening that to
+   "secondary" would overstate the case against it.
+4. **Draft audit** — `auditSentence` / `auditDraft`. Three levels, deliberately separated by precision:
+
+| Level | Signal | Fails a build? |
+|---|---|---|
+| **HARD** | relay marker — "as reported by", "quoted in", "summarised in", "according to \<named source\>" | Yes, under `--strict` |
+| **WARN** | two or more *separate* parenthetical citation groups (the "X says Y found Z" shape). One parenthetical with a semicolon list is a citation list, not a relay | No |
+| **ADVISORY** | a cited figure; a synthesis narrowed to a specific cause; declared provenance | No |
+
+**Declared provenance downgrades rather than silences.** A sentence saying "second-hand",
+"abstract only", "not read" or "reported-not-verified" moves from HARD to ADVISORY: it is still
+second-hand, but no longer *undeclared*. Without that, the tool penalises honesty — the audited
+document's frank "second-hand citation (Hansen 1998, via Dollahite)" would fail `--strict`, which
+pushes an author to delete the disclosure rather than the error. The distinction it enforces is
+**status word, not route word**: "quoted in" says where a claim came from, which is not the same as
+saying how far it was verified.
+
+### Probed, not assumed (2026-10-29)
+
+| Probe | Result | Consequence for the code |
+|---|---|---|
+| Chest 2005 (`10.1378/chest.128.6.3817`), retracted 2008 | Crossref returns **no** `update-to`, no `updated-by`, no `relation`. Only the title prefix `RETRACTED:`. OpenAlex `is_retracted: true` | A Crossref-only check **misses** it. Title-prefix detection is load-bearing, and there is a regression test asserting Crossref alone still catches it |
+| Wakefield notice (`10.1016/S0140-6736(10)60175-4`) | Crossref `update-to: [{type:'retraction', source:'retraction-watch'}]`; OpenAlex `type: 'retraction'` **and** `is_retracted: true` | `update-to` lives on the **notice**, not the work. And `is_retracted` is **ambiguous**: on a notice it means "this is a notice". Type disambiguates; without that branch the tool reports a retraction notice as a retracted work |
+| OpenAlex batch `filter=doi:a\|b\|c&select=doi,type,is_retracted` | 3 DOIs, one call, `cost_usd: 0.0001` | Screen a 20-result search in **one** metered call, then fetch Crossref detail only for hits |
+| OpenAlex `type` on a known review | `review` (vs `article`) | Claim scope is read from metadata rather than inferred from the title |
+
+### What it cannot do
+
+- **It cannot tell you a claim is wrong.** It tells you which sentences must be opened at primary
+  source before the claim is load-bearing. On the six real defects it satisfies: **HARD 2/6, any
+  level 6/6** — asserted in the suite, so a change that quietly improves or degrades recall fails
+  the test rather than passing unnoticed.
+- **The confidence class needs a different control.** "Median 66 days" and an unverified effect size
+  are not attribution errors; no relay marker marks them. The ADVISORY figure check is a prompt, not
+  a solution — a `{claim, source, access: abstract|fulltext}` ledger is the actual fix and is not built.
+- **Abstracts are not papers.** Dollahite et al.'s abstract attributes to one source (Pew); its
+  *body* also summarised Bengtson, Lee, Hansen and Vermeer. Abstract-level detection cannot reach
+  the body, which is where half the errors lived.
+- **Absence of a retraction flag is not safety.** The verdict is `no-retraction-on-record` with a
+  timestamp and a caveat, never "clean" — coverage depends on the publisher and on Retraction Watch's
+  feed into Crossref.
+- **No grammar for scope.** "Active learning beats lecture" → "cooperative learning beats lecture" is
+  caught only when a specifier word is present. The semantic version needs the synthesis's own
+  claim list, which CiteKit does not hold.
+
 ## Evaluation: what is actually measured, and how well
 
 `tests/eval-ranking.mjs` implements the conventions the IR literature uses: **depth-k pooling**
@@ -467,6 +549,12 @@ Rule of thumb: assemble if you mostly need *reading and citing*; keep this file 
    URL into Settings → Proxy URL. Built and verified locally against the real workerd runtime;
    only the deploy needs an account. While there: `wrangler secret put S2_KEY` and `CORE_KEY`
    so the two key-gated sources actually work.
+1b. **An access-level ledger for the confidence class.** `tools/fidelity.mjs` catches the
+   *attribution* class but cannot catch a figure stated with more certainty than its source
+   ("median 66 days" from a body the author never read). The missing piece is `--claim "{text}"
+   --source <DOI>` appending `{claim, source, access: abstract|fulltext}` to a ledger, and a check
+   that fails when a claim marked load-bearing sits at `access: abstract`. Until that exists, the
+   ADVISORY figure prompt is the only cover.
 2. A real screen-reader pass (VoiceOver/NVDA). The automated assertions cover roles, live regions,
    focus order and keyboard operability, but no screen reader has actually been driven.
 3. IndexedDB library with per-paper embeddings for large corpora.
