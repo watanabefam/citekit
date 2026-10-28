@@ -329,7 +329,7 @@ node tools/fidelity.mjs doi 10.1378/chest.128.6.3817        # retraction + scope
 node tools/fidelity.mjs screen DOI [DOI...]                # batched, one metered call
 node tools/fidelity.mjs draft ../family/habits/prayer.md   # audit prose
 node tools/fidelity.mjs draft FILE --strict                # exit 1 on an undeclared relay
-node tests/fidelity.mjs [--live]                           # 142 assertions, 3 live probes
+node tests/fidelity.mjs [--live]                           # 145 assertions, 3 live probes
 ```
 
 **Six checks, each a separate failure.** They are pure functions over already-fetched payloads, so
@@ -518,6 +518,25 @@ covers every `CCC <n>`, and a key of `§` covers bare section references:
 An explicit map is required for books, catechism paragraphs and reports because guessing a URL from
 "Pew 2016" would sometimes resolve to the wrong document, and a wrong document is worse than no
 check. Fetched sources are cached under `~/.cache/citekit/src/`, so a second run costs nothing.
+
+**Commit the map beside the document.** If `citations.map.json` sits in the same directory as the
+draft, `quotes` finds it with no flag at all:
+
+```
+$ cd family/habits && node ../../citekit/tools/fidelity.mjs quotes prayer.md --online
+69 inline quote(s) · 5 verified · 0 not found · 1 unverifiable · 28 unattributed · 35 too short
+sources: 0 corpus file(s) + online resolution + map citations.map.json
+  VERIFIED   [map · §154]   after a process of explanation
+  VERIFIED   [map · CCC 2729] The habitual difficulty in prayer is **distraction**.
+```
+
+Keeping it in the repository rather than in a home directory is the point: it is the only input that
+cannot be derived, so it has to be reviewable in a diff and usable by any agent or collaborator who
+picks the document up later. Two label rules make a small map cover a lot:
+
+- the source word **nearest** a § wins, so `DGC §154 … and the CCC agrees` resolves as DGC
+- a bare `§2727` resolves to a filed `"CCC 2727"` entry, so the document can be inconsistent about
+  spelling without losing coverage
 
 ### Citation / reference symmetry
 

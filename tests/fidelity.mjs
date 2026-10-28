@@ -560,12 +560,19 @@ section('15. online resolution (mocked fetch, no network)');
   ok(citationLabelIn('the Catechism says (CCC 2688)').value === 'CCC 2688',
     'CCC with the word present is labelled CCC');
   ok(citationLabelIn('DGC §154 says so').value === 'DGC §154', 'DGC §N keeps its own label');
+  // Proximity: a line can name both documents, and the one immediately before the § is the source.
+  ok(citationLabelIn('the DGC text (DGC §154) agrees with the CCC here').value === 'DGC §154',
+    'the source word nearest the § wins, not any source word in the line');
+  ok(citationLabelIn('the CCC says so (CCC §2688)').value === 'CCC 2688',
+    'CCC still wins when it is the nearest word');
   ok(citationLabelIn('see §3.2 above').value === '§3.2'.replace('.2', ''),
     'a bare cross-reference is NOT assumed to be the Catechism');
 
   // Map lookup, including the generic section source.
-  const map = { CCC: 'https://ccc.example/a', '§': 'https://sections.example/b', 'Pew 2016': { url: 'https://pew.example/c' } };
+  const map = { CCC: 'https://ccc.example/a', '§': 'https://sections.example/b', 'Pew 2016': { url: 'https://pew.example/c' }, 'CCC 2727': 'https://ccc.example/p2727' };
   ok(mapLookup(map, 'CCC 2688').url === 'https://ccc.example/a', 'a section citation resolves via its source key');
+  ok(mapLookup(map, '§2727').url === 'https://ccc.example/p2727',
+    'a bare §N resolves to an explicitly filed "CCC N" entry');
   ok(mapLookup(map, '§154').url === 'https://sections.example/b', 'a bare § resolves via the generic key');
   ok(mapLookup(map, 'pew 2016').url === 'https://pew.example/c', 'map keys are case-insensitive');
   ok(mapLookup(map, 'Nowhere 1999') === null, 'an unmapped label resolves to nothing rather than guessing');

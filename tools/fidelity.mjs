@@ -976,9 +976,13 @@ export function citationLabelIn(context) {
   const sect = /§+\s*(\d+)/.exec(c);
   if (sect) {
     const n = sect[1];
-    if (/\b(?:CCC|Catechism)\b/i.test(c)) return { kind: 'label', value: `CCC ${n}` };
-    const d = /\b(DGC|GDC|DC|Directory)\b/i.exec(c);
+    // Nearest source word BEFORE the section mark wins, because a line can mention both
+    // ("DGC §154 … and the CCC agrees"). Scanning the whole line picked CCC for a DGC citation.
+    const before = c.slice(Math.max(0, sect.index - 60), sect.index);
+    if (/\b(?:CCC|Catechism)\b/i.test(before)) return { kind: 'label', value: `CCC ${n}` };
+    const d = /\b(DGC|GDC|DC|Directory)\b/i.exec(before);
     if (d) return { kind: 'label', value: `${d[1].toUpperCase()} §${n}` };
+    if (/\b(?:CCC|Catechism)\b/i.test(c)) return { kind: 'label', value: `CCC ${n}` };
     return { kind: 'label', value: `§${n}` };
   }
   const ccc = /\bCCC\s*(\d+)/.exec(c);
@@ -1002,8 +1006,16 @@ export function mapLookup(map, label) {
   for (const [k, v] of Object.entries(map)) {
     if (k.toLowerCase().trim() === base) return typeof v === 'string' ? { url: v } : v;
   }
-  // A bare "§N" has no source word in it, so let a map declare a generic section source under "§".
-  if (want.startsWith('§') && map['§']) return typeof map['§'] === 'string' ? { url: map['§'] } : map['§'];
+  // A bare "§N" has no source word in it, so a document that files its paragraphs as "CCC 2727"
+  // should still resolve "§2727". Try the specific and the generic spellings before giving up.
+  if (want.startsWith('§')) {
+    const n = want.replace(/^§\s*/, '');
+    for (const alt of [`ccc ${n}`, `dgc §${n}`, `dgc ${n}`]) {
+      const v = map[alt] ?? map[alt.toUpperCase()] ?? map[Object.keys(map).find(k => k.toLowerCase().trim() === alt)];
+      if (v) return typeof v === 'string' ? { url: v } : v;
+    }
+    if (map['§']) return typeof map['§'] === 'string' ? { url: map['§'] } : map['§'];
+  }
   return null;
 }
 
@@ -1439,9 +1451,17 @@ async function main() {
     const path = args[1];
     const flag = (n) => { const i = args.indexOf('--' + n); return i >= 0 ? args[i + 1] : ''; };
     const corpusDir = flag('corpus');
-    const mapPath = flag('map');
+    let mapPath = flag('map');
     const online = args.includes('--online');
     if (!path) { console.error('usage: node tools/fidelity.mjs quotes <draft.md> --corpus <dir> | --online [--map f.json]'); process.exit(2); }
+    // Auto-discover a map committed beside the draft. Keeping it in the repository is the point:
+    // the map is the one input that cannot be derived, so it has to be reviewable and shareable
+    // rather than living in one agent's shell history.
+    if (!mapPath) {
+      const { dirname, join } = await import('node:path');
+      const beside = join(dirname(path), 'citations.map.json');
+      if (fs.existsSync(beside)) mapPath = beside;
+    }
     if (!corpusDir && !online) {
       console.error('give --corpus <dir> (local source texts) and/or --online (fetch sources by DOI/URL).');
       process.exit(2);
@@ -1469,7 +1489,7 @@ async function main() {
     console.log(`${r.total} inline quote(s) \u00b7 ${r.verified} verified \u00b7 ${r.notFound.length} not found `
       + `\u00b7 ${r.unverifiable ? r.unverifiable.length + ' unverifiable ' : ''}\u00b7 ${r.unattributed} unattributed `
       + `\u00b7 ${r.tooShort} too short`);
-    console.log(`sources: ${nFiles} corpus file(s)${online ? ' + online resolution' : ''}${map ? ' + map' : ''}`);
+    console.log(`sources: ${nFiles} corpus file(s)${online ? ' + online resolution' : ''}${map ? ` + map ${mapPath.replace(process.env.HOME || '~', '~')}` : ''}`);
     console.log('(a quote is only checked when a citation sits in the same sentence; unattributed quotes are '
       + 'your own words or a prayer text, not claims about a source)\n');
 
