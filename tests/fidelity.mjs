@@ -14,6 +14,7 @@ import {
   classifyRetraction, detectAttributions, claimScope, auditSentence, auditDraft, checkDoi,
   similarity, reconcile, RECONCILE, encodeCompact, decodeRecord, ledgerToMarkdown, claimTokens,
   normaliseQuote, extractQuotes, verifyQuote, quoteReport, citationSymmetry,
+  quotesOnline, stripHtml, citationLabelIn, mapLookup, titleMatches,
 } from '../tools/fidelity.mjs';
 
 let pass = 0, fail = 0;
@@ -542,6 +543,88 @@ section('14. citation / reference symmetry');
     'the reissued book yields one entry (1964), not two');
   ok(!s.uncited.some(u => u.name === 'Kilgour'),
     'a semicolon-separated bullet lists every citation, not just the first');
+}
+
+section('15. online resolution (mocked fetch, no network)');
+
+{
+  ok(stripHtml('<p>Hello <b>world</b></p><script>bad()</script>').trim() === 'Hello world',
+    'stripHtml removes tags and scripts');
+  ok(/&/.test(stripHtml('a &amp; b')) && stripHtml('a &amp; b').includes('a & b'),
+    'entities decode');
+
+  // Citation nearest a quote, most specific first.
+  ok(citationLabelIn('as shown (10.3102/0034654321991228)').value === '10.3102/0034654321991228',
+    'a DOI is extracted');
+  ok(citationLabelIn('see https://example.org/paper for this').kind === 'url', 'a URL is extracted');
+  ok(citationLabelIn('the Catechism says (CCC 2688)').value === 'CCC 2688',
+    'CCC with the word present is labelled CCC');
+  ok(citationLabelIn('DGC §154 says so').value === 'DGC §154', 'DGC §N keeps its own label');
+  ok(citationLabelIn('see §3.2 above').value === '§3.2'.replace('.2', ''),
+    'a bare cross-reference is NOT assumed to be the Catechism');
+
+  // Map lookup, including the generic section source.
+  const map = { CCC: 'https://ccc.example/a', '§': 'https://sections.example/b', 'Pew 2016': { url: 'https://pew.example/c' } };
+  ok(mapLookup(map, 'CCC 2688').url === 'https://ccc.example/a', 'a section citation resolves via its source key');
+  ok(mapLookup(map, '§154').url === 'https://sections.example/b', 'a bare § resolves via the generic key');
+  ok(mapLookup(map, 'pew 2016').url === 'https://pew.example/c', 'map keys are case-insensitive');
+  ok(mapLookup(map, 'Nowhere 1999') === null, 'an unmapped label resolves to nothing rather than guessing');
+
+  // Title gate.
+  ok(titleMatches('Attention Is All You Need', 'Attention Is All You Need: we propose the Transformer') === true,
+    'the right document passes the title gate');
+  ok(titleMatches('Attention Is All You Need', 'A study of tumour cell lines and proton relaxation') === false,
+    'an unrelated document fails the title gate');
+
+  // The cascade: candidate 1 is a wrong-but-fetchable document, candidate 2 is the real one.
+  const WRONG = ('A study of proton spin-lattice relaxation in tumour cell lines. ').repeat(6);
+  const QUOTE = 'we propose a new simple network architecture, the Transformer, based solely on attention mechanisms';
+  const RIGHT = ('Attention Is All You Need. ' + QUOTE + '. ').repeat(4);
+  const mock = async (url) => {
+    if (url.includes('api.openalex.org')) {
+      return new Response(JSON.stringify({
+        title: 'Attention Is All You Need',
+        open_access: { oa_status: 'green' },
+        best_oa_location: { is_oa: true, pdf_url: 'https://wrong.example/x' },
+        locations: [{ is_oa: true, pdf_url: 'https://wrong.example/x' }, { is_oa: true, pdf_url: 'https://right.example/y' }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url.includes('wrong.example')) return new Response(WRONG, { status: 200, headers: { 'content-type': 'text/html' } });
+    if (url.includes('right.example')) return new Response(RIGHT, { status: 200, headers: { 'content-type': 'text/html' } });
+    return new Response('nope', { status: 404 });
+  };
+  const tmp = (await import('node:fs')).mkdtempSync(`${(await import('node:os')).tmpdir()}/ck-`);
+  const doc = `The paper states "${QUOTE}" (10.1234/test.2020).`;
+
+  const good = await quotesOnline(doc, { fetchImpl: mock, cacheDir: tmp });
+  ok(good.verified === 1, 'a quote verifies from the second candidate after the first is rejected',
+    JSON.stringify(good.results.map(r => r.status)));
+  ok(good.results[0].url === 'https://right.example/y', 'the URL used is the one that matched the title');
+  ok(good.notFound.length === 0, 'rejecting a wrong copy does not produce a false "not found"');
+
+  // The safety property: if ONLY the wrong copy exists, the answer must be "could not check".
+  const onlyWrong = async (url) => url.includes('api.openalex.org')
+    ? new Response(JSON.stringify({
+        title: 'Attention Is All You Need', open_access: { oa_status: 'green' },
+        best_oa_location: { is_oa: true, pdf_url: 'https://wrong.example/x' }, locations: [],
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    : (url.includes('wrong.example')
+        ? new Response(WRONG, { status: 200, headers: { 'content-type': 'text/html' } })
+        : new Response('nope', { status: 404 }));
+
+  const bad = await quotesOnline(doc, { fetchImpl: onlyWrong, cacheDir: tmp });
+  ok(bad.notFound.length === 0 && bad.unverifiable.length === 1,
+    'THE SAFETY PROPERTY: a wrong copy yields "unverifiable", never "not found"');
+  ok(/title/i.test(bad.unverifiable[0].why || ''), 'the reason names the title mismatch');
+
+  // A closed-access DOI is reported as such, not as a defect.
+  const closed = async (url) => url.includes('api.openalex.org')
+    ? new Response(JSON.stringify({ title: 'X', open_access: { oa_status: 'closed' }, locations: [] }),
+        { status: 200, headers: { 'content-type': 'application/json' } })
+    : new Response('nope', { status: 404 });
+  const cl = await quotesOnline(doc, { fetchImpl: closed, cacheDir: tmp });
+  ok(cl.unverifiable.length === 1 && /closed/.test(cl.unverifiable[0].why),
+    'closed access is reported as unverifiable with its reason');
 }
 
 section('8. citation contexts (pure)');

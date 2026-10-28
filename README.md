@@ -329,7 +329,7 @@ node tools/fidelity.mjs doi 10.1378/chest.128.6.3817        # retraction + scope
 node tools/fidelity.mjs screen DOI [DOI...]                # batched, one metered call
 node tools/fidelity.mjs draft ../family/habits/prayer.md   # audit prose
 node tools/fidelity.mjs draft FILE --strict                # exit 1 on an undeclared relay
-node tests/fidelity.mjs [--live]                           # 123 assertions, 3 live probes
+node tests/fidelity.mjs [--live]                           # 142 assertions, 3 live probes
 ```
 
 **Six checks, each a separate failure.** They are pure functions over already-fetched payloads, so
@@ -457,6 +457,67 @@ A quote is only checked when a **citation sits in the same sentence**. That gate
 quotation from a scare quote, a rhetorical question, or the words of a prayer. Without it, the real
 draft produced 34 "not found" flags of which most were the author's own emphasis; with it, 6 — and
 of those, 4 were quotes from a source that simply was not in the corpus yet.
+
+#### Checking against the sources themselves, online
+
+A local corpus is the fast path, not the only one. `--online` resolves each quote's citation to a
+live copy:
+
+```bash
+node tools/fidelity.mjs quotes doc.md --online                      # DOI -> open-access copy
+node tools/fidelity.mjs quotes doc.md --online --map sources.json   # explicit label -> URL
+```
+
+Probed with a plain request and a browser User-Agent: **arXiv 200, PMC 200, vatican.va 200,
+pewresearch.org 200, scborromeo.org 200, MDPI 403 "Access Denied"**. So preprints, PMC, and
+institutional web pages are checkable; some publishers block automated fetches, and closed-access
+work is unavailable by definition.
+
+Three things this had to get right, each found by running it on real DOIs:
+
+**`best_oa_location` is not authoritative.** For `10.48550/arXiv.1706.03762` (Attention Is All You
+Need) OpenAlex returns the correct title but a `best_oa_location` pointing at an unrelated preprint
+host. Trusting it fetched a tumour-biology paper. All OA locations are now collected and tried in
+order — including repository mirrors, which are often reachable when the publisher is not.
+
+**Every candidate must pass a title gate** before any verdict is drawn from it. Without that, a
+wrong-but-fetchable URL produces a confident "quote not found" against an innocent author. The gate
+is what makes the difference between rejecting a *copy* and rejecting a *quote*: on the arXiv DOI,
+candidate 1 fetched 97KB of the wrong document and was discarded, and candidate 5 verified.
+
+**"Could not check" is its own outcome.** A blocked fetch, a closed-access work, a title mismatch,
+or a page that does not contain the cited paragraph all report `unverifiable` with the reason —
+never `not found`. The same applies to a `§N` citation whose fetched page does not contain `§N`
+(the equivalent of pagecite's `quote_page_mismatch`): the map pointed at the wrong page, so the
+quote is not accused.
+
+Verified end to end: a verbatim sentence from the arXiv PDF verified from the fetched source, and a
+one-word mutation of the same sentence did not.
+
+Worked example on the real draft, with a three-entry map for the Catechism and Pew:
+
+```
+69 inline quote(s) · 1 verified · 0 not found · 5 unverifiable · 28 unattributed · 35 too short
+  VERIFIED   [map · CCC 2729] The habitual difficulty in prayer is **distraction**.
+  SKIPPED    [CCC 2608] source page does not contain §2608 — wrong page
+```
+
+Zero false accusations, one real verification, every skip explained.
+
+A `--map` file is plain JSON. Values may be a URL, a list of URLs, or `{url, title}`; a key of `CCC`
+covers every `CCC <n>`, and a key of `§` covers bare section references:
+
+```json
+{
+  "CCC": "https://www.scborromeo.org/ccc/p4s1c3a2.htm",
+  "§": "https://example.org/directory-of-catechesis",
+  "Pew 2016": "https://www.pewresearch.org/religion/2016/08/24/why-americas-nones-left-religion-behind/"
+}
+```
+
+An explicit map is required for books, catechism paragraphs and reports because guessing a URL from
+"Pew 2016" would sometimes resolve to the wrong document, and a wrong document is worse than no
+check. Fetched sources are cached under `~/.cache/citekit/src/`, so a second run costs nothing.
 
 ### Citation / reference symmetry
 
@@ -678,11 +739,12 @@ Rule of thumb: assemble if you mostly need *reading and citing*; keep this file 
    only the deploy needs an account. While there: `wrangler secret put S2_KEY` and `CORE_KEY`
    so the two key-gated sources actually work.
 1b. ~~An access-level ledger for the confidence class~~ — **built** as `claim add|list|check`, with
-   reconciliation, compact storage and quote/symmetry checks alongside. Still missing: a pre-commit
-   hook, a `quotes` mode that resolves each quote to *its own* cited source rather than one corpus
-   directory, block-quote scanning (deliberately deferred — in a house style that also uses `> ` for
-   callouts it is mostly noise), and page-level checking, which needs the source's page mapping and
-   is why `pagecite` reports `quote_page_mismatch` separately.
+   reconciliation, compact storage, quote/symmetry checks and online source resolution alongside.
+   Still missing: a pre-commit hook; block-quote scanning (deliberately deferred — in a house style
+   that also uses `> ` for callouts it is mostly noise); page-level checking, which needs the
+   source's page mapping and is why `pagecite` reports `quote_page_mismatch` separately; and
+   automatic author-year -> DOI resolution, which is left to the explicit `--map` because a
+   mis-resolved work is worse than an unperformed check.
 2. A real screen-reader pass (VoiceOver/NVDA). The automated assertions cover roles, live regions,
    focus order and keyboard operability, but no screen reader has actually been driven.
 3. IndexedDB library with per-paper embeddings for large corpora.

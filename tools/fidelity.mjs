@@ -768,7 +768,11 @@ export function verifyQuote(quote, corpusText) {
 const CITE_NEAR = new RegExp(String.raw`\b${NAME}\s*(?:et\s+al\.?,?\s*)?[,(]?\s*(?:19|20)\d{2}\b`
   + String.raw`|\((?:[^()]{0,90}?)(?:19|20)\d{2}[^()]{0,30}\)`
   + String.raw`|§+\s*\d`
-  + String.raw`|\bCCC\s*\d`, 'i');
+  + String.raw`|\bCCC\s*\d`
+  // A DOI or URL is an attribution too. Missing these made a DOI-cited quotation look
+  // unattributed, which silently skipped the check rather than passing it.
+  + String.raw`|10\.\d{4,9}\/[^\s)"'<>]+`
+  + String.raw`|https?:\/\/`, 'i');
 
 // Verify every inline quote in a draft against a corpus of plain-text sources.
 export function quoteReport(markdown, corpusText) {
@@ -870,6 +874,260 @@ export function citationSymmetry(markdown) {
     && !cited.some(c => c.year === l.year && nameMatches(c.words || new Set([c.name.toLowerCase()]), l.words)));
 
   return { entries: entries.length, listed: listed.length, cited: cited.length, orphans, uncited };
+}
+
+/* ============================ 6d. online quote checking ============================ */
+// Probed 2026-10-29 with a plain curl and a browser User-Agent, against the kinds of source this
+// project actually cites:
+//   arXiv PDF   200 (application/pdf)      PMC OA article   200        vatican.va   200
+//   pewresearch.org  200                   scborromeo.org   200        MDPI PDF     403 Access Denied
+// So most sources CAN be checked online — preprints, PMC, and institutional web pages — while some
+// publishers block automated fetches and closed-access work is unavailable by definition. The
+// failure mode to avoid is treating "could not fetch" as "quote is wrong". Those are different
+// outcomes and the report keeps them different.
+
+const pdfCacheDir = () => `${process.env.HOME || '.'}/.cache/citekit/src`;
+
+export function stripHtml(html) {
+  return String(html || '')
+    .replace(/<script\b[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<(?:br|\/p|\/div|\/li|\/h[1-6])\b[^>]*>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(+d))
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+// Fetch one URL and return plain text, caching by URL so a second run costs nothing. A PDF is
+// converted with pdftotext (poppler) rather than a JS parser: it is present on this machine, it
+// handles real publisher PDFs, and it keeps the dependency out of node_modules.
+export async function fetchSourceText(url, { timeoutMs = 25000, cacheDir = pdfCacheDir(), fetchImpl = fetch } = {}) {
+  const fs = await import('node:fs');
+  const crypto = await import('node:crypto');
+  const key = crypto.createHash('sha1').update(url).digest('hex').slice(0, 16);
+  const txtPath = `${cacheDir}/${key}.txt`;
+  try {
+    if (fs.existsSync(txtPath)) {
+      const cached = fs.readFileSync(txtPath, 'utf8');
+      if (cached.length > 200) return { ok: true, text: cached, via: 'cache', chars: cached.length };
+    }
+  } catch { /* cache miss is not an error */ }
+
+  let body, ctype;
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), timeoutMs);
+    const res = await fetchImpl(url, {
+      signal: ctl.signal,
+      redirect: 'follow',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+          + '(KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+        Accept: 'text/html,application/pdf;q=0.9,*/*;q=0.8',
+      },
+    });
+    clearTimeout(timer);
+    if (!res.ok) return { ok: false, reason: `HTTP ${res.status}`, blocked: res.status === 403 || res.status === 429 };
+    ctype = res.headers.get('content-type') || '';
+    body = Buffer.from(await res.arrayBuffer());
+  } catch (e) {
+    return { ok: false, reason: e.name === 'AbortError' ? 'timeout' : e.message.slice(0, 80) };
+  }
+
+  const isPdf = /pdf/i.test(ctype) || body.slice(0, 5).toString('latin1') === '%PDF-';
+  let text;
+  if (isPdf) {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const run = promisify(execFile);
+    const pdfPath = `${cacheDir}/${key}.pdf`;
+    try {
+      fs.mkdirSync(cacheDir, { recursive: true });
+      fs.writeFileSync(pdfPath, body);
+      const { stdout } = await run('pdftotext', ['-layout', pdfPath, '-'], { maxBuffer: 64 * 1024 * 1024 });
+      text = stdout;
+    } catch (e) {
+      return { ok: false, reason: `pdf extract failed: ${String(e.message).slice(0, 60)}` };
+    }
+  } else {
+    text = stripHtml(body.toString('utf8'));
+  }
+
+  if (!text || text.length < 200) return { ok: false, reason: `only ${text ? text.length : 0} chars extracted` };
+  try { fs.mkdirSync(cacheDir, { recursive: true }); fs.writeFileSync(txtPath, text); } catch { /* cache write is best-effort */ }
+  return { ok: true, text, via: isPdf ? 'pdf' : 'html', chars: text.length };
+}
+
+// The citation nearest a quote, most specific first. A DOI beats a URL beats a label, because each
+// step down that list is a step away from something that can be resolved unambiguously.
+export function citationLabelIn(context) {
+  const c = String(context || '');
+  const doi = /(10\.\d{4,9}\/[^\s)"'<>\]]+)/.exec(c);
+  if (doi) return { kind: 'doi', value: doi[1].replace(/[.,;]$/, '') };
+  const url = /(https?:\/\/[^\s)"'<>\]]+)/.exec(c);
+  if (url) return { kind: 'url', value: url[1] };
+  // "§" is not automatically the Catechism: the same documents write "DGC §154", "DC §201" and
+  // their own internal cross-references as "§3.2". Assuming CCC mapped an internal cross-reference
+  // to "CCC 3" and then checked a prayer quote against a catechism page.
+  const sect = /§+\s*(\d+)/.exec(c);
+  if (sect) {
+    const n = sect[1];
+    if (/\b(?:CCC|Catechism)\b/i.test(c)) return { kind: 'label', value: `CCC ${n}` };
+    const d = /\b(DGC|GDC|DC|Directory)\b/i.exec(c);
+    if (d) return { kind: 'label', value: `${d[1].toUpperCase()} §${n}` };
+    return { kind: 'label', value: `§${n}` };
+  }
+  const ccc = /\bCCC\s*(\d+)/.exec(c);
+  if (ccc) return { kind: 'label', value: `CCC ${ccc[1]}` };
+  const ay = /\b([A-Z][A-Za-z'\u2019-]{2,})\s*(?:et\s+al\.?)?,?\s*((?:19|20)\d{2})\b/.exec(c);
+  if (ay) return { kind: 'label', value: `${ay[1]} ${ay[2]}` };
+  return null;
+}
+
+// A user-supplied label -> URL map. Explicit because it is the only reliable way to point at a book,
+// a catechism paragraph, or a report: guessing a publisher URL from "Pew 2016" would sometimes
+// resolve to the wrong document, and a wrong document produces a confident false verdict.
+export function mapLookup(map, label) {
+  if (!map || !label) return null;
+  const want = label.toLowerCase().trim();
+  for (const [k, v] of Object.entries(map)) {
+    if (k.toLowerCase().trim() === want) return typeof v === 'string' ? { url: v } : v;
+  }
+  // "CCC 2688" -> a map key of "CCC" covers every paragraph the same document contains
+  const base = want.split(/\s+/)[0];
+  for (const [k, v] of Object.entries(map)) {
+    if (k.toLowerCase().trim() === base) return typeof v === 'string' ? { url: v } : v;
+  }
+  // A bare "§N" has no source word in it, so let a map declare a generic section source under "§".
+  if (want.startsWith('§') && map['§']) return typeof map['§'] === 'string' ? { url: map['§'] } : map['§'];
+  return null;
+}
+
+async function openAlexOaUrls(doi, fetchImpl = fetch) {
+  const url = `https://api.openalex.org/works/doi:${encodeURIComponent(doi)}`
+    + '?select=doi,title,open_access,best_oa_location,locations';
+  try {
+    const res = await fetchImpl(url, { headers: { Accept: 'application/json' } });
+    if (!res.ok) return { urls: [], reason: `OpenAlex HTTP ${res.status}` };
+    const d = await res.json();
+    const urls = [];
+    const push = u => { if (u && !urls.includes(u)) urls.push(u); };
+    // best_oa_location is NOT authoritative. Probed: for 10.48550/arXiv.1706.03762 OpenAlex returns
+    // the right title but a best_oa_location on an unrelated preprint host, so trusting it alone
+    // fetches the wrong paper and turns into a false accusation. Collect every OA location and try
+    // them in order, publisher copy first, then repositories (which are often NOT bot-blocked when
+    // the publisher is: MDPI 403s, but the Texas Tech mirror of the same paper does not).
+    const best = d?.best_oa_location;
+    if (best?.is_oa) push(best.pdf_url), push(best.landing_page_url);
+    for (const l of d?.locations || []) if (l?.is_oa) { push(l.pdf_url); push(l.landing_page_url); }
+    return { urls, title: d?.title || '', status: d?.open_access?.oa_status };
+  } catch (e) { return { urls: [], reason: e.message.slice(0, 60) }; }
+}
+
+// Does this fetched text actually belong to the cited work? Without this check a wrong-but-fetchable
+// URL produces a confident "quote not found" against an innocent author. Half of a title's longer
+// words appearing is enough to accept, and failing to find the title rejects the candidate rather
+// than the quote.
+export function titleMatches(title, text) {
+  const words = [...new Set(normaliseQuote(title).split(' ')
+    .filter(w => w.length >= 4 && !STOPWORDS.has(w)))];
+  if (!words.length) return true;
+  const hay = normaliseQuote(text);
+  return words.filter(w => hay.includes(w)).length / words.length >= 0.6;
+}
+
+// Verify quotes against online sources, falling back to a local corpus. Every quote lands in
+// exactly one bucket, and `unverifiable` is never reported as a failure.
+export async function quotesOnline(markdown, {
+  map = null, corpusText = '', cacheDir = pdfCacheDir(), fetchImpl = fetch, online = true,
+} = {}) {
+  const quotes = extractQuotes(markdown);
+  const results = [];
+  for (const q of quotes) {
+    if (q.tooShort) { results.push({ ...q, status: 'too-short' }); continue; }
+    const near = CITE_NEAR.test(q.context || '') ? citationLabelIn(q.context) : null;
+    if (!near) { results.push({ ...q, status: 'unattributed' }); continue; }
+
+    // local corpus first: free, offline, and typically the text has already been curated
+    if (corpusText) {
+      const local = verifyQuote(q.quote, corpusText);
+      if (local.status === 'verified') { results.push({ ...q, ...local, via: 'corpus' }); continue; }
+    }
+
+    // Candidate sources, most authoritative first: an explicit map entry, then a URL in the prose,
+    // then every open-access location OpenAlex knows for the DOI.
+    const candidates = [];
+    const mapped = mapLookup(map, near.value);
+    if (mapped?.url) {
+      for (const u of (Array.isArray(mapped.url) ? mapped.url : [mapped.url])) {
+        candidates.push({ url: u, how: 'map', title: mapped.title || '' });
+      }
+    } else if (near.kind === 'url') {
+      candidates.push({ url: near.value, how: 'url' });
+    } else if (near.kind === 'doi' && online) {
+      const oa = await openAlexOaUrls(near.value, fetchImpl);
+      if (!oa.urls.length) {
+        results.push({ ...q, status: 'unverifiable', cite: near.value,
+          why: oa.reason || (oa.status === 'closed' ? 'closed access' : 'no open-access copy') });
+        continue;
+      }
+      for (const u of oa.urls) candidates.push({ url: u, how: 'openaccess', title: oa.title });
+    }
+
+    if (!candidates.length) {
+      results.push({ ...q, status: 'unverifiable', cite: near.value,
+        why: `no URL for "${near.value}" — add it to --map` });
+      continue;
+    }
+
+    // Try candidates until one both fetches AND can be shown to be the cited work. Rejecting a
+    // candidate is not the same as rejecting the quote, and the loop is ordered so the honest
+    // outcome is "could not check" rather than a confident accusation.
+    const num = /^(?:CCC|DGC|GDC|DC|§)\s*§?\s*(\d{2,4})$/.exec(near.value);
+    let checked = null; let lastWhy = null; let lastUrl = null;
+    for (const c of candidates) {
+      lastUrl = c.url;
+      const src = await fetchSourceText(c.url, { cacheDir, fetchImpl });
+      if (!src.ok) {
+        lastWhy = src.blocked ? `${src.reason} — publisher blocks automated fetch` : src.reason;
+        continue;
+      }
+      if (c.title && !titleMatches(c.title, src.text)) {
+        lastWhy = 'fetched document does not match the cited title — wrong copy at that URL';
+        continue;
+      }
+      if (num && !new RegExp(`\\b${num[1]}\\b`).test(src.text)) {
+        lastWhy = `source page does not contain \u00a7${num[1]} \u2014 wrong page`;
+        continue;
+      }
+      checked = { c, src };
+      break;
+    }
+    if (!checked) {
+      results.push({ ...q, status: 'unverifiable', cite: near.value, url: lastUrl,
+        why: lastWhy || 'no usable copy' });
+      continue;
+    }
+    const v = verifyQuote(q.quote, checked.src.text);
+    results.push({ ...q, ...v, cite: near.value, via: checked.c.how,
+      url: checked.c.url, sourceChars: checked.src.chars });
+    continue;
+  }
+
+  const by = s => results.filter(r => r.status === s);
+  return {
+    total: results.length,
+    verified: by('verified').length,
+    notFound: by('not-found'),
+    unverifiable: by('unverifiable'),
+    unattributed: by('unattributed').length,
+    tooShort: by('too-short').length,
+    results,
+  };
 }
 
 /* ============================ 7. how a paper is actually cited ============================ */
@@ -1179,23 +1437,51 @@ async function main() {
   if (cmd === 'quotes') {
     const fs = await import('node:fs');
     const path = args[1];
-    const corpusDir = (() => { const i = args.indexOf('--corpus'); return i >= 0 ? args[i + 1] : ''; })();
-    if (!path) { console.error('usage: node tools/fidelity.mjs quotes <draft.md> --corpus <dir>'); process.exit(2); }
-    if (!corpusDir || !fs.existsSync(corpusDir)) {
-      console.error('--corpus <dir> is required: quote verification compares against source text you already have.');
+    const flag = (n) => { const i = args.indexOf('--' + n); return i >= 0 ? args[i + 1] : ''; };
+    const corpusDir = flag('corpus');
+    const mapPath = flag('map');
+    const online = args.includes('--online');
+    if (!path) { console.error('usage: node tools/fidelity.mjs quotes <draft.md> --corpus <dir> | --online [--map f.json]'); process.exit(2); }
+    if (!corpusDir && !online) {
+      console.error('give --corpus <dir> (local source texts) and/or --online (fetch sources by DOI/URL).');
       process.exit(2);
     }
-    const files = fs.readdirSync(corpusDir).filter(f => /\.(txt|md|text)$/i.test(f));
-    const corpus = files.map(f => fs.readFileSync(`${corpusDir}/${f}`, 'utf8')).join('\n\n');
-    const r = quoteReport(fs.readFileSync(path, 'utf8'), corpus);
+    let corpus = '';
+    let nFiles = 0;
+    if (corpusDir) {
+      if (!fs.existsSync(corpusDir)) { console.error(`no such corpus dir: ${corpusDir}`); process.exit(2); }
+      const files = fs.readdirSync(corpusDir).filter(f => /\.(txt|md|text)$/i.test(f));
+      nFiles = files.length;
+      corpus = files.map(f => fs.readFileSync(`${corpusDir}/${f}`, 'utf8')).join('\n\n');
+    }
+    let map = null;
+    if (mapPath) {
+      if (!fs.existsSync(mapPath)) { console.error(`no such map file: ${mapPath}`); process.exit(2); }
+      try { map = JSON.parse(fs.readFileSync(mapPath, 'utf8')); }
+      catch (e) { console.error(`map file is not valid JSON: ${e.message}`); process.exit(2); }
+    }
+
+    const md = fs.readFileSync(path, 'utf8');
+    const r = online
+      ? await quotesOnline(md, { map, corpusText: corpus })
+      : quoteReport(md, corpus);
+
     console.log(`${r.total} inline quote(s) \u00b7 ${r.verified} verified \u00b7 ${r.notFound.length} not found `
-      + `\u00b7 ${r.unattributed} unattributed \u00b7 ${r.tooShort} too short`);
-    console.log(`corpus: ${files.length} file(s), ${corpus.length} chars`);
-    console.log('(a quote is only checked when a citation sits in the same sentence; '
-      + 'unattributed quotes are your own words or a prayer text, not claims about a source)\n');
-    for (const n of r.notFound) {
-      console.log(`  NOT FOUND  ${n.quote.replace(/\s+/g, ' ').slice(0, 140)}`);
-      if (n.part) console.log(`             missing fragment: ${n.part}`);
+      + `\u00b7 ${r.unverifiable ? r.unverifiable.length + ' unverifiable ' : ''}\u00b7 ${r.unattributed} unattributed `
+      + `\u00b7 ${r.tooShort} too short`);
+    console.log(`sources: ${nFiles} corpus file(s)${online ? ' + online resolution' : ''}${map ? ' + map' : ''}`);
+    console.log('(a quote is only checked when a citation sits in the same sentence; unattributed quotes are '
+      + 'your own words or a prayer text, not claims about a source)\n');
+
+    for (const x of r.results || []) {
+      if (x.status === 'verified') {
+        console.log(`  VERIFIED   [${x.via}${x.cite ? ' \u00b7 ' + x.cite : ''}] ${x.quote.replace(/\s+/g, ' ').slice(0, 90)}`);
+      } else if (x.status === 'not-found') {
+        console.log(`  NOT FOUND  [${x.cite}${x.url ? ' \u00b7 ' + x.url : ''}] ${x.quote.replace(/\s+/g, ' ').slice(0, 110)}`);
+        if (x.part) console.log(`             missing fragment: ${x.part}`);
+      } else if (x.status === 'unverifiable') {
+        console.log(`  SKIPPED    [${x.cite}] ${x.why}`);
+      }
     }
     if (process.argv.includes('--strict') && r.notFound.length) process.exit(1);
     return;
