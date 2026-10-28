@@ -49,5 +49,23 @@ ok('web record is labelled and carries URL + extracted text',
    `${wrec.host || 'no host'} · ${(wrec.abstract || '').length} chars`);
 fs.rmSync(wout, { force: true });
 
+// A failed screen must be visible in the RESULTS, not only on stderr: an agent that reads the
+// markdown and sees no retraction warning would otherwise conclude nothing was retracted, when in
+// fact nothing was checked.
+const { toMarkdown } = await import('../tools/search.mjs');
+const failedMd = toMarkdown({
+  generated: 'now', per: 1, sources: ['openalex'],
+  screenFailed: { reason: 'HTTP 429', dois: 3 },
+  queries: { q: { count: 0, errors: [], records: [] } },
+});
+ok('a failed retraction screen is announced in the output, not just stderr',
+   /RETRACTION SCREEN DID NOT RUN/.test(failedMd) && /3 DOI\(s\) were NOT checked/.test(failedMd));
+const cleanMd = toMarkdown({
+  generated: 'now', per: 1, sources: ['openalex'],
+  screened: { dois: 3, retracted: 0 },
+  queries: { q: { count: 0, errors: [], records: [] } },
+});
+ok('no banner when the screen actually ran', !/RETRACTION SCREEN DID NOT RUN/.test(cleanMd));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

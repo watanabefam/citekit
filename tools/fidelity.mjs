@@ -723,27 +723,55 @@ export function normaliseQuote(s) {
 
 const wordCount = s => String(s || '').trim().split(/\s+/).filter(Boolean).length;
 
-// Inline quotations only: "..." and “…”. Block quotes ("> ") are deliberately excluded for now —
-// in a house style that also uses them for callouts, scanning them produces mostly noise, and a
-// check that cries wolf is worse than one that does not run.
+// Inline quotations, scanned a BLOCK at a time rather than a line at a time.
+//
+// Why blocks: markdown prose is hard-wrapped, so a quotation routinely breaks across a newline —
+// 70 lines of the document this was built against do exactly that. A line-by-line scan returns
+// NOTHING for a quote like
+//     "the memorization of basic prayers offers an essential support to the life of prayer,
+//      but it is important to help learners savor their meaning"
+// which silently undercounts the document's quotations rather than mislabelling them. That is the
+// same hard-wrap bug the draft auditor had, and it is worse here because a miss looks like absence.
+//
+// Blockquote markers ("&gt; ") are stripped, so a quotation inside a callout is checked; a callout
+// with no quotation marks produces nothing, so ordinary callout prose adds no noise. Fenced code and
+// table rows are still excluded.
 export function extractQuotes(markdown = '') {
   const out = [];
+  let block = [];
   let inFence = false;
-  for (const line of String(markdown).split('\n')) {
-    if (/^```/.test(line.trim())) { inFence = !inFence; continue; }
-    if (inFence) continue;
-    if (line.trim().startsWith('|')) continue;           // table row
-    // Minimum 4 characters, not 12: a short quotation must still be *seen* so it can be reported
-    // as too short to prove anything. A floor high enough to filter those out made the too-short
-    // verdict unreachable, which is the wrong silence.
+
+  const sentenceAround = (text, idx) => {
+    const start = Math.max(0, text.lastIndexOf('. ', idx) + 2);
+    const endDot = text.indexOf('. ', idx);
+    const end = endDot < 0 ? text.length : endDot + 1;
+    return text.slice(start, end).trim() || text;
+  };
+
+  const flush = () => {
+    if (!block.length) return;
+    const text = block.join(' ').replace(/\s+/g, ' ').trim();
+    block = [];
+    if (text.length < 4) return;
     const re = /["\u201C]([^"\u201C\u201D]{4,400})["\u201D]/g;
     let m;
-    while ((m = re.exec(line))) {
+    while ((m = re.exec(text))) {
       const quote = m[1].trim();
       const words = wordCount(quote);
-      out.push({ quote, words, tooShort: words < 4, context: line });
+      // Context is the sentence carrying the quote, not the whole block: proximity to a citation is
+      // what separates a quotation from a scare quote, and a paragraph-wide window would blur that.
+      out.push({ quote, words, tooShort: words < 4, context: sentenceAround(text, m.index) });
     }
+  };
+
+  for (const raw of String(markdown).split('\n')) {
+    if (/^```/.test(raw.trim())) { flush(); inFence = !inFence; continue; }
+    if (inFence) continue;
+    const line = raw.replace(/^\s*>\s?/, '');
+    if (!line.trim() || line.trim().startsWith('|')) { flush(); continue; }
+    block.push(line.trim());
   }
+  flush();
   return out;
 }
 
@@ -1045,6 +1073,24 @@ export function citationLabelIn(context) {
   return null;
 }
 
+// Every citation in a sentence, deduped, most specific kind first. Multi-source sentences are
+// normal ("…the book reports that “…” (Pew 2009; Bengtson 2013)"), and taking only the first label
+// checked a quotation against the source that happened to be mentioned first.
+export function citationLabelsIn(context) {
+  const c = String(context || '');
+  const out = [];
+  const push = l => { if (l && !out.some(x => x.value === l.value)) out.push(l); };
+  for (const m of c.matchAll(/(10\.\d{4,9}\/[^\s)"'<>\]]+)/g)) push({ kind: 'doi', value: m[1].replace(/[.,;]$/, '') });
+  for (const m of c.matchAll(/(https?:\/\/[^\s)"'<>\]]+)/g)) push({ kind: 'url', value: m[1] });
+  push(citationLabelIn(c));
+  for (const m of c.matchAll(/\b([A-Z][A-Za-z'\u2019-]{2,})\s*(?:et\s+al\.?)?,?\s*((?:19|20)\d{2})\b/g)) {
+    const first = m[1];
+    if (NOT_A_NAME.has(first) || CLASS_LABEL.has(first) || INST_WORD.has(first)) continue;
+    push({ kind: 'label', value: `${first} ${m[2]}` });
+  }
+  return out.slice(0, 4);            // bounded: each label can cost a network round trip
+}
+
 // A user-supplied label -> URL map. Explicit because it is the only reliable way to point at a book,
 // a catechism paragraph, or a report: guessing a publisher URL from "Pew 2016" would sometimes
 // resolve to the wrong document, and a wrong document produces a confident false verdict.
@@ -1114,8 +1160,11 @@ export async function quotesOnline(markdown, {
   const results = [];
   for (const q of quotes) {
     if (q.tooShort) { results.push({ ...q, status: 'too-short' }); continue; }
-    const near = CITE_NEAR.test(q.context || '') ? citationLabelIn(q.context) : null;
-    if (!near) { results.push({ ...q, status: 'unattributed' }); continue; }
+    // A sentence can cite several works: "…the book reports that “…” (Pew 2009; Bengtson 2013)".
+    // Taking only the first label checked a Bengtson quotation against Pew 2009 and reported a
+    // false "not found". Every label in the sentence is now a candidate source.
+    const labels = CITE_NEAR.test(q.context || '') ? citationLabelsIn(q.context) : [];
+    if (!labels.length) { results.push({ ...q, status: 'unattributed' }); continue; }
 
     // local corpus first: free, offline, and typically the text has already been curated
     if (corpusText) {
@@ -1123,64 +1172,64 @@ export async function quotesOnline(markdown, {
       if (local.status === 'verified') { results.push({ ...q, ...local, via: 'corpus' }); continue; }
     }
 
-    // Candidate sources, most authoritative first: an explicit map entry, then a URL in the prose,
-    // then every open-access location OpenAlex knows for the DOI.
-    const candidates = [];
-    const mapped = mapLookup(map, near.value);
-    if (mapped?.url) {
-      for (const u of (Array.isArray(mapped.url) ? mapped.url : [mapped.url])) {
-        candidates.push({ url: u, how: 'map', title: mapped.title || '' });
+    const notes = [];        // why a label could not be used
+    const readable = [];     // labels we actually managed to read
+    let hit = null;
+
+    for (const near of labels) {
+      const candidates = [];
+      const mapped = mapLookup(map, near.value);
+      if (mapped?.url) {
+        for (const u of (Array.isArray(mapped.url) ? mapped.url : [mapped.url])) {
+          candidates.push({ url: u, how: 'map', title: mapped.title || '' });
+        }
+      } else if (near.kind === 'url') {
+        candidates.push({ url: near.value, how: 'url' });
+      } else if (near.kind === 'doi' && online) {
+        const oa = await openAlexOaUrls(near.value, fetchImpl);
+        if (!oa.urls.length) {
+          notes.push(`${near.value}: ${oa.reason || (oa.status === 'closed' ? 'closed access' : 'no open-access copy')}`);
+          continue;
+        }
+        for (const u of oa.urls) candidates.push({ url: u, how: 'openaccess', title: oa.title });
       }
-    } else if (near.kind === 'url') {
-      candidates.push({ url: near.value, how: 'url' });
-    } else if (near.kind === 'doi' && online) {
-      const oa = await openAlexOaUrls(near.value, fetchImpl);
-      if (!oa.urls.length) {
-        results.push({ ...q, status: 'unverifiable', cite: near.value,
-          why: oa.reason || (oa.status === 'closed' ? 'closed access' : 'no open-access copy') });
-        continue;
+      if (!candidates.length) { notes.push(`${near.value}: no URL — add it to --map`); continue; }
+
+      // Try candidates until one both fetches AND can be shown to be the cited work.
+      const num = /^(?:CCC|DGC|GDC|DC|§)\s*§?\s*(\d{2,4})$/.exec(near.value);
+      let usable = null, why = null;
+      for (const c of candidates) {
+        const src = await fetchSourceText(c.url, { cacheDir, fetchImpl });
+        if (!src.ok) {
+          why = src.blocked ? `${src.reason} — publisher blocks automated fetch` : src.reason;
+          continue;
+        }
+        if (c.title && !titleMatches(c.title, src.text)) { why = 'document does not match the cited title'; continue; }
+        if (num && !new RegExp(`\\b${num[1]}\\b`).test(src.text)) { why = `page does not contain \u00a7${num[1]}`; continue; }
+        usable = { c, src };
+        break;
       }
-      for (const u of oa.urls) candidates.push({ url: u, how: 'openaccess', title: oa.title });
+      if (!usable) { notes.push(`${near.value}: ${why || 'no usable copy'}`); continue; }
+      const v = verifyQuote(q.quote, usable.src.text);
+      readable.push({ near, usable, v });
+      if (v.status === 'verified') { hit = { near, usable, v }; break; }
     }
 
-    if (!candidates.length) {
-      results.push({ ...q, status: 'unverifiable', cite: near.value,
-        why: `no URL for "${near.value}" — add it to --map` });
+    if (hit) {
+      results.push({ ...q, ...hit.v, cite: hit.near.value, via: hit.usable.c.how,
+        url: hit.usable.c.url, sourceChars: hit.usable.src.chars });
       continue;
     }
-
-    // Try candidates until one both fetches AND can be shown to be the cited work. Rejecting a
-    // candidate is not the same as rejecting the quote, and the loop is ordered so the honest
-    // outcome is "could not check" rather than a confident accusation.
-    const num = /^(?:CCC|DGC|GDC|DC|§)\s*§?\s*(\d{2,4})$/.exec(near.value);
-    let checked = null; let lastWhy = null; let lastUrl = null;
-    for (const c of candidates) {
-      lastUrl = c.url;
-      const src = await fetchSourceText(c.url, { cacheDir, fetchImpl });
-      if (!src.ok) {
-        lastWhy = src.blocked ? `${src.reason} — publisher blocks automated fetch` : src.reason;
-        continue;
-      }
-      if (c.title && !titleMatches(c.title, src.text)) {
-        lastWhy = 'fetched document does not match the cited title — wrong copy at that URL';
-        continue;
-      }
-      if (num && !new RegExp(`\\b${num[1]}\\b`).test(src.text)) {
-        lastWhy = `source page does not contain \u00a7${num[1]} \u2014 wrong page`;
-        continue;
-      }
-      checked = { c, src };
-      break;
+    // Accuse the quote only when EVERY source cited beside it was actually read. If any one was
+    // blocked, closed, or the wrong page, the quotation may belong to that source, so the honest
+    // answer is "could not check". A source we failed to read must never become a verdict.
+    if (readable.length && !notes.length) {
+      results.push({ ...q, status: 'not-found',
+        cite: readable.map(c => c.near.value).join('; '), url: readable[0].usable.c.url });
+    } else {
+      results.push({ ...q, status: 'unverifiable',
+        cite: labels.map(l => l.value).join('; '), why: notes.join(' | ') || 'no usable copy' });
     }
-    if (!checked) {
-      results.push({ ...q, status: 'unverifiable', cite: near.value, url: lastUrl,
-        why: lastWhy || 'no usable copy' });
-      continue;
-    }
-    const v = verifyQuote(q.quote, checked.src.text);
-    results.push({ ...q, ...v, cite: near.value, via: checked.c.how,
-      url: checked.c.url, sourceChars: checked.src.chars });
-    continue;
   }
 
   const by = s => results.filter(r => r.status === s);
@@ -1403,12 +1452,25 @@ async function main() {
     };
     const has = name => args.includes('--' + name);
     const ledgerPath = get('ledger', get('draft') ? get('draft') + '.claims.jsonl' : 'claims.jsonl');
-    const read = () => fs.existsSync(ledgerPath)
-      ? fs.readFileSync(ledgerPath, 'utf8').split('\n').filter(Boolean)
-          .map(l => { try { return JSON.parse(l); } catch { return null; } })
-          .filter(o => o && !o.z)                                  // skip the header line
-          .map(decodeRecord)
-      : [];
+    const read = () => {
+      if (!fs.existsSync(ledgerPath)) return [];
+      const lines = fs.readFileSync(ledgerPath, 'utf8').split('\n').filter(Boolean);
+      const out = [];
+      let skipped = 0;
+      for (const l of lines) {
+        let o;
+        try { o = JSON.parse(l); } catch { skipped++; continue; }
+        if (!o || o.z) continue;                       // header line
+        out.push(decodeRecord(o));
+      }
+      // A dropped line is a claim that silently stops being checked — the exact failure mode this
+      // ledger exists to prevent, so it is reported rather than swallowed.
+      if (skipped) {
+        console.error(`warning: ${skipped} unparseable line(s) in ${ledgerPath} were ignored — `
+          + `those claims are NOT being checked`);
+      }
+      return out;
+    };
 
     if (sub === 'add') {
       const claim = get('text');

@@ -22,6 +22,7 @@
 // --sources AND --proxy/--core-key (or CITEKIT_PROXY / CITEKIT_CORE_KEY). `web` is Tavily: keyless by
 // default, or --tavily-key / TAVILY_API_KEY / CITEKIT_TAVILY_KEY.
 import fs from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { loadLL } from './load-ll.mjs';
 import { screenDois } from './fidelity.mjs';
 
@@ -191,7 +192,12 @@ async function main() {
         } else {
           process.stderr.write(`   screened ${dois.length} DOIs: no retraction on record\n`);
         }
-      } catch (e) { process.stderr.write(`   retraction screen unavailable: ${e.message}\n`); }
+      } catch (e) {
+        // stderr alone is not enough: an agent reading the results would see no retraction warnings
+        // and read that as "nothing retracted", when in fact nothing was checked.
+        out.screenFailed = { reason: e.message, dois: dois.length };
+        process.stderr.write(`   retraction screen unavailable: ${e.message}\n`);
+      }
     }
   }
 
@@ -202,8 +208,13 @@ async function main() {
 
 function authors(r) { return Array.isArray(r.authors) && r.authors.length ? r.authors.join(', ') : '—'; }
 
-function toMarkdown(out) {
+export function toMarkdown(out) {
   const lines = [`# citekit headless search`, `_${out.generated} · per-source ${out.per} · sources: ${out.sources.join(', ')}_`];
+  if (out.screenFailed) {
+    lines.push('', `> **\u26a0 RETRACTION SCREEN DID NOT RUN** \u2014 ${out.screenFailed.reason}. `
+      + `${out.screenFailed.dois} DOI(s) were NOT checked, so the absence of a warning below means `
+      + `nothing. Re-run before relying on these results.`);
+  }
   for (const [query, res] of Object.entries(out.queries)) {
     lines.push(`\n## ${query}`, `_${res.count} unique${res.errors.length ? ' · ' + res.errors.join(' | ') : ''}_\n`);
     for (const r of res.records) {
@@ -223,4 +234,10 @@ function toMarkdown(out) {
   return lines.join('\n');
 }
 
-main().catch(e => { process.stderr.write('fatal: ' + e.stack + '\n'); process.exit(1); });
+// Run only when invoked directly. Importing this module used to launch a search and then exit the
+// process, which made `toMarkdown` untestable — the one function that decides what a caller actually
+// sees. Nothing else imports this file, so the guard changes no existing behaviour.
+const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (invokedDirectly) {
+  main().catch(e => { process.stderr.write('fatal: ' + e.stack + '\n'); process.exit(1); });
+}

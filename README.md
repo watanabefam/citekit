@@ -333,11 +333,12 @@ node tools/fidelity.mjs quotes FILE.md --online            # verify quotations a
 node tools/fidelity.mjs refs FILE.md                       # orphan citations, uncited references
 node tools/fidelity.mjs sources                            # cached sources + their token cost
 node tools/fidelity.mjs passage URL --grep "phrase"        # one passage, not the whole paper
-node tests/fidelity.mjs [--live]                           # 154 assertions, 3 live probes
+node tests/fidelity.mjs [--live]                           # 162 assertions, 3 live probes
 ```
 
-**Six checks, each a separate failure.** They are pure functions over already-fetched payloads, so
-the suite needs no network except the three `--live` probes.
+**Four checks over already-fetched payloads, plus two that read the draft's sources.** The suite
+still needs no network except the three `--live` probes: the online path is tested against a mocked
+fetch.
 
 1. **Retraction** — `classifyRetraction({crossref, openalex})`. Three signals, because no single one
    is sufficient (see the probe table below). Runs on **every `tools/search.mjs` run** by default:
@@ -457,6 +458,13 @@ thousands separators normalised — and **decimal points preserved, so `4.2` can
 An ellipsis splits the quote into parts that must appear *in order*. Under four words is refused
 rather than credited.
 
+Extraction scans a **block**, not a line, and reads blockquotes. Markdown prose is hard-wrapped, so a
+quotation routinely breaks across a newline; a line-by-line scan returns nothing for those, and a
+miss is indistinguishable from an absence. On the real document that bug hid a third of the
+quotations, including the one the whole file is built on. Context is taken from the sentence carrying
+the quote rather than the whole block, so proximity to a citation still separates a quotation from a
+scare quote.
+
 A quote is only checked when a **citation sits in the same sentence**. That gate is what separates a
 quotation from a scare quote, a rhetorical question, or the words of a prayer. Without it, the real
 draft produced 34 "not found" flags of which most were the author's own emphasis; with it, 6 — and
@@ -498,15 +506,19 @@ quote is not accused.
 Verified end to end: a verbatim sentence from the arXiv PDF verified from the fetched source, and a
 one-word mutation of the same sentence did not.
 
-Worked example on the real draft, with a three-entry map for the Catechism and Pew:
+Worked example on the real draft (`family/habits/prayer.md`, 1,100 lines):
 
 ```
-69 inline quote(s) · 1 verified · 0 not found · 5 unverifiable · 28 unattributed · 35 too short
+102 inline quote(s) · 7 verified · 0 not found · 16 unverifiable · 44 unattributed · 35 too short
+  VERIFIED   [map · CCC 2688] The memorization of basic prayers offers an essential support to the life of prayer…
   VERIFIED   [map · CCC 2729] The habitual difficulty in prayer is **distraction**.
-  SKIPPED    [CCC 2608] source page does not contain §2608 — wrong page
+  VERIFIED   [map · Pew 2009] just gradually drifted away
+  SKIPPED    [Pew 2009; Bengtson 2013] Bengtson 2013: no URL — add it to --map
 ```
 
-Zero false accusations, one real verification, every skip explained.
+Zero false accusations, seven real verifications, every skip explained. The counts moved from 69
+quotes / 5 verified to 102 / 7 when quotation extraction was fixed to scan blocks instead of lines —
+the earlier figure was an undercount, not a different document.
 
 A `--map` file is plain JSON. Values may be a URL, a list of URLs, or `{url, title}`; a key of `CCC`
 covers every `CCC <n>`, and a key of `§` covers bare section references:
@@ -793,11 +805,13 @@ Rule of thumb: assemble if you mostly need *reading and citing*; keep this file 
    so the two key-gated sources actually work.
 1b. ~~An access-level ledger for the confidence class~~ — **built** as `claim add|list|check`, with
    reconciliation, compact storage, quote/symmetry checks and online source resolution alongside.
-   Still missing: a pre-commit hook; block-quote scanning (deliberately deferred — in a house style
-   that also uses `> ` for callouts it is mostly noise); page-level checking, which needs the
-   source's page mapping and is why `pagecite` reports `quote_page_mismatch` separately; and
-   automatic author-year -> DOI resolution, which is left to the explicit `--map` because a
-   mis-resolved work is worse than an unperformed check.
+   Still missing: a pre-commit hook; automatic author-year -> DOI resolution, which is left to the
+   explicit `--map` because a mis-resolved work is worse than an unperformed check; and page-level
+   checking, which needs the source's page mapping and is why `pagecite` reports
+   `quote_page_mismatch` separately. Block-quote scanning was first deferred as noise and then turned
+   out to be essential: the house style puts its most important quotations in `> ` blocks, so
+   scanning blocks (and taking the context from the sentence rather than the paragraph) was required
+   to reach the real quotations at all.
 2. A real screen-reader pass (VoiceOver/NVDA). The automated assertions cover roles, live regions,
    focus order and keyboard operability, but no screen reader has actually been driven.
 3. IndexedDB library with per-paper embeddings for large corpora.

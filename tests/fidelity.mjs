@@ -12,9 +12,9 @@
 
 import {
   classifyRetraction, detectAttributions, claimScope, auditSentence, auditDraft, checkDoi,
-  similarity, reconcile, RECONCILE, encodeCompact, decodeRecord, ledgerToMarkdown, claimTokens,
+  similarity, reconcile, RECONCILE, encodeCompact, decodeRecord, ledgerToMarkdown,
   normaliseQuote, extractQuotes, verifyQuote, quoteReport, citationSymmetry,
-  quotesOnline, stripHtml, citationLabelIn, mapLookup, titleMatches,
+  quotesOnline, stripHtml, citationLabelIn, citationLabelsIn, mapLookup, titleMatches,
   readSourceIndex, findPassages,
 } from '../tools/fidelity.mjs';
 
@@ -505,6 +505,20 @@ section('13. quote extraction');
   ok(q.length === 1, 'only the inline prose quotation is extracted', `got ${q.length}`);
   ok(/a real quotation/.test(q[0].quote), 'the extracted text is the right one');
   ok(extractQuotes('He said "tiny".')[0].tooShort === true, 'a three-word quote is flagged too short');
+
+  // HARD-WRAP: markdown prose is wrapped, so a quotation routinely spans a newline. A line-by-line
+  // scan returns nothing for these, which undercounts a document's quotations silently.
+  const wrapped = 'The Catechism says "the memorization of basic prayers offers an essential\n'
+    + 'support to the life of prayer" (CCC 2688).';
+  const qw = extractQuotes(wrapped);
+  ok(qw.length === 1, 'a quotation broken across a newline is still found', `got ${qw.length}`);
+  ok(/essential support to the life of prayer/.test(qw[0].quote), 'the wrapped quote is reassembled whole');
+
+  // Blockquotes carry the house style's most important quotations.
+  const bq = '> "the memorization of basic prayers offers an essential support" — **Church**, CCC 2688';
+  const qb = extractQuotes(bq);
+  ok(qb.length === 1, 'a quotation inside a blockquote is found', `got ${qb.length}`);
+  ok(/CCC 2688/.test(qb[0].context), 'the blockquote citation is kept as context');
 }
 
 section('14. citation / reference symmetry');
@@ -633,6 +647,34 @@ section('15. online resolution (mocked fetch, no network)');
   const cl = await quotesOnline(doc, { fetchImpl: closed, cacheDir: tmp });
   ok(cl.unverifiable.length === 1 && /closed/.test(cl.unverifiable[0].why),
     'closed access is reported as unverifiable with its reason');
+
+  // A sentence can cite several works. Checking a quotation against only the first one accused the
+  // wrong author: "…the book reports that “…” (Pew 2009; Bengtson 2013)".
+  const labels = citationLabelsIn('and the book reports that (Pew 2009; Bengtson 2013)');
+  ok(labels.length === 2 && labels.some(l => l.value === 'Pew 2009' && labels.some(x => x.value === 'Bengtson 2013')),
+    'every source in a multi-source citation becomes a candidate', JSON.stringify(labels.map(l => l.value)));
+
+  const ABSENT = 'a sentence that is definitely not in the text at all';
+  const plainText = ('Some other content entirely, nothing resembling the quotation. ').repeat(6);
+  const citeMock = async (url) => (url.includes('a.example')
+    ? new Response(plainText, { status: 200, headers: { 'content-type': 'text/html' } })
+    : new Response('nope', { status: 404 }));
+
+  // One source readable and lacking the quote, one source unmapped: cannot accuse, because the
+  // quotation may belong to the source we could not read.
+  const partial = await quotesOnline(`He wrote "${ABSENT}" (Pew 2009; Nowhere 1999).`, {
+    map: { 'Pew 2009': 'https://a.example/x' }, fetchImpl: citeMock, cacheDir: tmp,
+  });
+  ok(partial.notFound.length === 0 && partial.unverifiable.length === 1,
+    'UNREADABLE SIBLING: a readable source without the quote is not enough to accuse');
+  ok(/Nowhere 1999/.test(partial.unverifiable[0].why || ''), 'the reason names the source not read');
+
+  // Control: both sources readable and neither contains it, so the verdict is a real not-found.
+  const both = await quotesOnline(`He wrote "${ABSENT}" (Pew 2009; Bengtson 2013).`, {
+    map: { 'Pew 2009': 'https://a.example/x', 'Bengtson 2013': 'https://a.example/y' },
+    fetchImpl: citeMock, cacheDir: tmp,
+  });
+  ok(both.notFound.length === 1, 'CONTROL: when every cited source was read, an absence is a real finding');
 }
 
 section('16. cached sources and passage retrieval');
