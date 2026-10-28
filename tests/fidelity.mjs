@@ -15,6 +15,7 @@ import {
   similarity, reconcile, RECONCILE, encodeCompact, decodeRecord, ledgerToMarkdown, claimTokens,
   normaliseQuote, extractQuotes, verifyQuote, quoteReport, citationSymmetry,
   quotesOnline, stripHtml, citationLabelIn, mapLookup, titleMatches,
+  readSourceIndex, findPassages,
 } from '../tools/fidelity.mjs';
 
 let pass = 0, fail = 0;
@@ -632,6 +633,43 @@ section('15. online resolution (mocked fetch, no network)');
   const cl = await quotesOnline(doc, { fetchImpl: closed, cacheDir: tmp });
   ok(cl.unverifiable.length === 1 && /closed/.test(cl.unverifiable[0].why),
     'closed access is reported as unverifiable with its reason');
+}
+
+section('16. cached sources and passage retrieval');
+
+{
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const dir = fs.mkdtempSync(`${os.tmpdir()}/ck-src-`);
+  fs.writeFileSync(`${dir}/aaa.txt`, [
+    'The memorization of basic prayers offers an essential support.',
+    'Filler line that should not be returned.',
+    '2729 The habitual difficulty in prayer is distraction.',
+    'More filler.',
+  ].join('\n'));
+  fs.writeFileSync(`${dir}/index.json`, JSON.stringify({
+    'https://example.org/ccc': { file: 'aaa.txt', chars: 200, via: 'html', at: 'now' },
+  }));
+
+  const idx = await readSourceIndex(dir);
+  ok(Object.keys(idx).length === 1, 'the index is readable');
+
+  const hits = await findPassages(dir, 'example.org', 'habitual difficulty');
+  ok(hits.length === 1, 'exactly the matching passage is returned', `got ${hits.length}`);
+  ok(/distraction/.test(hits[0].text), 'the passage carries the matched text');
+  const tight = await findPassages(dir, 'example.org', 'habitual difficulty', { context: 0 });
+  ok(!/memorization/.test(tight[0].text), 'with context 0 only the matching line is returned');
+  ok(/memorization/.test(hits[0].text), 'with context, neighbouring lines are included deliberately');
+  ok(hits[0].line === 3, 'the line number is reported');
+
+  const none = await findPassages(dir, 'example.org', 'no-such-phrase-anywhere');
+  ok(none.length === 0, 'a miss returns nothing rather than the whole source');
+
+  const filtered = await findPassages(dir, 'other.org', 'habitual difficulty');
+  ok(filtered.length === 0, 'a query that matches no cached URL returns nothing');
+
+  const capped = await findPassages(dir, '', '.', { max: 2 });
+  ok(capped.length === 2, '--max bounds the output so it cannot become the whole document');
 }
 
 section('8. citation contexts (pure)');

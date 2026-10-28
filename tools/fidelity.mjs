@@ -913,7 +913,20 @@ export async function fetchSourceText(url, { timeoutMs = 25000, cacheDir = pdfCa
   try {
     if (fs.existsSync(txtPath)) {
       const cached = fs.readFileSync(txtPath, 'utf8');
-      if (cached.length > 200) return { ok: true, text: cached, via: 'cache', chars: cached.length };
+      if (cached.length > 200) {
+        // Index on the cache-hit path too, or a source fetched before the index existed stays
+        // unaddressable forever and the whole point of the cache is lost.
+        try {
+          const indexPath = `${cacheDir}/index.json`;
+          let idx = {};
+          try { idx = JSON.parse(fs.readFileSync(indexPath, 'utf8')); } catch { idx = {}; }
+          if (!idx[url]) {
+            idx[url] = { file: `${key}.txt`, chars: cached.length, via: 'cache', at: new Date().toISOString() };
+            fs.writeFileSync(indexPath, JSON.stringify(idx, null, 1));
+          }
+        } catch { /* best-effort */ }
+        return { ok: true, text: cached, via: 'cache', chars: cached.length };
+      }
     }
   } catch { /* cache miss is not an error */ }
 
@@ -959,7 +972,47 @@ export async function fetchSourceText(url, { timeoutMs = 25000, cacheDir = pdfCa
 
   if (!text || text.length < 200) return { ok: false, reason: `only ${text ? text.length : 0} chars extracted` };
   try { fs.mkdirSync(cacheDir, { recursive: true }); fs.writeFileSync(txtPath, text); } catch { /* cache write is best-effort */ }
+  // Record URL -> file, so the cache is addressable later. Without this the cache is a pile of
+  // sha1 filenames, and "read only the passage you need" degrades to "cat the whole paper".
+  try {
+    const indexPath = `${cacheDir}/index.json`;
+    let idx = {};
+    try { idx = JSON.parse(fs.readFileSync(indexPath, 'utf8')); } catch { idx = {}; }
+    idx[url] = { file: `${key}.txt`, chars: text.length, via: isPdf ? 'pdf' : 'html', at: new Date().toISOString() };
+    fs.writeFileSync(indexPath, JSON.stringify(idx, null, 1));
+  } catch { /* index is best-effort */ }
   return { ok: true, text, via: isPdf ? 'pdf' : 'html', chars: text.length };
+}
+
+// The cached sources, biggest first — the reading list an agent can query instead of reloading.
+export async function readSourceIndex(cacheDir = pdfCacheDir()) {
+  const fs = await import('node:fs');
+  try { return JSON.parse(fs.readFileSync(`${cacheDir}/index.json`, 'utf8')); }
+  catch { return {}; }
+}
+
+// Return only the lines that match, plus a little context. This is the token-cheap alternative to
+// putting a whole source in front of a model: the passage that settles the question, not the paper.
+export async function findPassages(cacheDir, query, pattern, { context = 2, max = 20 } = {}) {
+  const fs = await import('node:fs');
+  const idx = await readSourceIndex(cacheDir);
+  const re = new RegExp(pattern, 'i');
+  const out = [];
+  for (const [url, meta] of Object.entries(idx)) {
+    if (query && !url.toLowerCase().includes(String(query).toLowerCase())
+      && !String(meta.file).toLowerCase().includes(String(query).toLowerCase())) continue;
+    const p = `${cacheDir}/${meta.file}`;
+    if (!fs.existsSync(p)) continue;
+    const lines = fs.readFileSync(p, 'utf8').split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      if (!re.test(lines[i])) continue;
+      const text = lines.slice(Math.max(0, i - context), Math.min(lines.length, i + context + 1))
+        .join('\n').replace(/[ \t]+/g, ' ').trim();
+      if (text) out.push({ url, line: i + 1, text });
+      if (out.length >= max) return out;
+    }
+  }
+  return out;
 }
 
 // The citation nearest a quote, most specific first. A DOI beats a URL beats a label, because each
@@ -1518,6 +1571,43 @@ async function main() {
     console.log(`  ${s.uncited.length} uncited reference(s) \u2014 in Sources but never cited`);
     for (const u of s.uncited.slice(0, 15)) console.log(`    \u00b7 ${u.label}`);
     if (process.argv.includes('--strict') && (s.orphans.length || s.uncited.length)) process.exit(1);
+    return;
+  }
+
+  if (cmd === 'sources') {
+    const idx = await readSourceIndex();
+    const rows = Object.entries(idx).sort((a, b) => b[1].chars - a[1].chars);
+    if (!rows.length) { console.log('no cached sources yet — run: quotes <draft.md> --online'); return; }
+    const tok = n => Math.round(n / 4.2);            // rough, but the comparison is the point
+    const total = rows.reduce((s, [, m]) => s + m.chars, 0);
+    console.log(`${rows.length} cached source(s), ${total.toLocaleString()} chars total\n`);
+    for (const [url, m] of rows) {
+      console.log(`  ${String(m.chars).padStart(8)} chars  ~${String(tok(m.chars)).padStart(6)} tok  ${m.via.padEnd(4)}  ${url.slice(0, 92)}`);
+    }
+    console.log('\nRead a passage, not a paper:  node tools/fidelity.mjs passage <url-substring> --grep "<regex>"');
+    return;
+  }
+
+  if (cmd === 'passage') {
+    const query = args[1];
+    const flag = (n) => { const i = args.indexOf('--' + n); return i >= 0 ? args[i + 1] : ''; };
+    const pattern = flag('grep');
+    if (!query || !pattern) {
+      console.error('usage: node tools/fidelity.mjs passage <url-substring> --grep "<regex>" [--context N] [--max N]');
+      process.exit(2);
+    }
+    const hits = await findPassages(pdfCacheDir(), query === '-' ? '' : query, pattern, {
+      context: +(flag('context') || 2), max: +(flag('max') || 20),
+    });
+    if (!hits.length) { console.log(`no line matching /${pattern}/i in cached sources for "${query}"`); return; }
+    let chars = 0;
+    for (const h of hits) {
+      console.log(`\n${h.url.slice(0, 92)}  line ${h.line}`);
+      console.log(h.text);
+      chars += h.text.length + h.url.length;
+    }
+    console.log(`\n${hits.length} passage(s), ~${Math.round(chars / 4.2)} tokens. `
+      + `The whole source would have been ~${Math.round((await readSourceIndex())[hits[0].url]?.chars / 4.2 || 0)} tokens.`);
     return;
   }
 

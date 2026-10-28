@@ -329,7 +329,11 @@ node tools/fidelity.mjs doi 10.1378/chest.128.6.3817        # retraction + scope
 node tools/fidelity.mjs screen DOI [DOI...]                # batched, one metered call
 node tools/fidelity.mjs draft ../family/habits/prayer.md   # audit prose
 node tools/fidelity.mjs draft FILE --strict                # exit 1 on an undeclared relay
-node tests/fidelity.mjs [--live]                           # 145 assertions, 3 live probes
+node tools/fidelity.mjs quotes FILE.md --online            # verify quotations against live sources
+node tools/fidelity.mjs refs FILE.md                       # orphan citations, uncited references
+node tools/fidelity.mjs sources                            # cached sources + their token cost
+node tools/fidelity.mjs passage URL --grep "phrase"        # one passage, not the whole paper
+node tests/fidelity.mjs [--live]                           # 154 assertions, 3 live probes
 ```
 
 **Six checks, each a separate failure.** They are pure functions over already-fetched payloads, so
@@ -537,6 +541,36 @@ picks the document up later. Two label rules make a small map cover a lot:
 - the source word **nearest** a § wins, so `DGC §154 … and the CCC agrees` resolves as DGC
 - a bare `§2727` resolves to a filed `"CCC 2727"` entry, so the document can be inconsistent about
   spelling without losing coverage
+
+#### Reading a source without paying for it
+
+Fetching a source for a check does not mean putting it in front of a model. Measured on one real
+paper:
+
+| artefact | size | tokens |
+|---|---|---|
+| the raw PDF | 4.74 MB (6.3 MB as base64) | unusable — beyond any context window |
+| extracted text | 97,246 chars | 17,704 |
+| one quoted sentence | 236 chars | 47 |
+| a verdict line | 29 chars | 21 |
+
+So conversion is not a token cost at all — `pdftotext` runs locally and the comparison is string
+matching, so checking a 4.7 MB PDF costs nothing. The cost only appears when text goes into a
+prompt. Two commands keep it out:
+
+```bash
+node tools/fidelity.mjs sources                                  # what is already cached
+node tools/fidelity.mjs passage scborromeo --grep "habitual difficulty"
+#   2729 The habitual difficulty in prayer is distraction. …      1 passage, ~165 tokens
+#   The whole source would have been ~2,979 tokens.
+```
+
+`sources` lists every fetched source with its size, and `passage` returns only the matching lines
+plus context, with both token counts printed. The cache is addressed by URL through
+`~/.cache/citekit/src/index.json`, because a directory of sha1 filenames is not queryable and
+"read only the passage you need" otherwise degrades to "cat the whole paper".
+
+Checking 100 papers costs ~2,100 tokens of verdicts. Loading those 100 papers costs ~1.77M.
 
 ### Citation / reference symmetry
 
