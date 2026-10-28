@@ -421,21 +421,70 @@ export function ledgerRecord({
   };
 }
 
-// Author-year pairs cited in a draft, for the cited-but-never-read check.
+// Structured documents label their own evidence tiers — "**Research**, Dollahite 2019" is a tier
+// label plus a citation, not an author called Research. Without these, every tier-labelled table
+// row produced a phantom citation.
+const CLASS_LABEL = new Set(['Research','Judgement','Judgment','Evidence','Church','Practice',
+  'Application','Caveats','Limits','Summary','Implication','Implications','Takeaway',
+  'Verdict','Notes','Note','Warning','Caution','Conclusion','Result','Finding','Findings']);
+
+// Institution words that terminate a name phrase. "Pew Research Center (2009)" and
+// "Congregation for the Clergy (1997)" are single authors; without this the scholarly regex
+// captures only the final capitalised word ("Center", "Clergy") and every such citation then looks
+// like an orphan because the Sources entry is filed under the full phrase.
+const INST_WORD = new Set(['Center','Centre','Institute','Council','Organization','Organisation',
+  'Association','Department','Foundation','Bureau','Survey','Board','Commission','Ministry',
+  'University','College','Society','Federation','Agency','Office','Conference','Assembly','See']);
+
+// Author-year pairs cited in a draft, for the cited-but-never-read and symmetry checks.
 export function citedAuthorYears(markdown = '') {
   const out = [];
   const seen = new Set();
   const text = String(markdown).replace(/`[^`]*`/g, ' ').replace(/\s+/g, ' ');
-  for (const m of text.matchAll(CITE_SCHOLAR)) {
-    if (NOT_A_NAME.has(m[1])) continue;
+
+  // Institution phrases first, so their spans can suppress the partial scholarly match inside them.
+  const instSpans = [];
+  for (const m of text.matchAll(CITE_INST)) {
+    instSpans.push([m.index, m.index + m[1].length]);
+    const after = text.slice(m.index + m[1].length, m.index + m[1].length + 12);
+    const yr = /^\s*[,(]?\s*((?:19|20)\d{2})/.exec(after);
     const name = m[1].replace(/^the\s+/i, '').trim();
-    if (!/[A-Za-z]{3,}/.test(name)) continue;
-    const key = `${name} ${m[2]}`.toLowerCase();
+    if (!yr) continue;
+    const key = `${name} ${yr[1]}`.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ name, year: m[2], label: `${name} ${m[2]}` });
+    out.push({ name, year: yr[1], label: `${name} ${yr[1]}`, words: nameWords(name) });
+  }
+  const insideInst = i => instSpans.some(([a, b]) => i >= a && i < b);
+
+  for (const m of text.matchAll(CITE_SCHOLAR)) {
+    if (insideInst(m.index)) continue;
+    const captured = m[1].replace(/^the\s+/i, '').trim();
+    const first = captured.split(/[ ,&]/)[0];
+    if (NOT_A_NAME.has(first)) continue;
+    if (CLASS_LABEL.has(first)) continue;
+    if (INST_WORD.has(first)) continue;                    // handled by the institution pass
+    // A capture that starts mid-list ("Babcock, Barrow & Rose (2019)", from
+    // "Dollahite, Marks, Babcock, Barrow & Rose (2019)") is not the citation's surname. Detect it
+    // by what precedes the match: a comma-separated capitalised name.
+    const before = text.slice(Math.max(0, m.index - 40), m.index);
+    if (/(?:^|[.;:!?]\s+)[A-Z][A-Za-z'’-]+,\s+(?:and\s+)?$/.test(before)) continue;
+    if (!/^[A-Z][A-Za-z'\u2019-]{2,}$/.test(first)) continue;
+    const key = `${first} ${m[2]}`.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ name: first, year: m[2], label: `${first} ${m[2]}`, words: nameWords(first) });
   }
   return out;
+}
+
+// Lowercase content words of a name, for overlap matching rather than exact string equality.
+function nameWords(s) {
+  return new Set(String(s || '').toLowerCase()
+    .replace(/[*_`]/g, ' ')
+    .replace(/[^\p{L}\p{N} ]+/gu, ' ')
+    .split(/\s+/)
+    .filter(w => w && !STOPWORDS.has(w) && !/^[a-z]$/.test(w)));   // drop initials
 }
 
 // The gate. Pure: entries + optional draft text in, findings out.
@@ -508,8 +557,322 @@ export function auditLedger(entries = [], { draft = '' } = {}) {
   };
 }
 
-/* ============================ 6. how a paper is actually cited ============================ */
+/* ============================ 5b. compact encoding ============================ */
+// Measured on a realistic 100-claim ledger, tiktoken o200k_base:
+//   verbose JSONL 13,474 tokens · compact JSON 6,015 (−55%) · pipe 4,645 (−66%)
+//   · markdown table 5,313 (−61%) · the REPORT alone 125 (−99%)
+// The lesson is that the encoding is the small lever and the interface is the large one: an agent
+// should read the report, never the file. So: compact JSON is the STORE (no delimiter escaping to
+// get wrong, extensible), and markdown/pipe are generated views for humans and prompts.
+// Legacy verbose records are still read, so existing ledgers keep working.
 
+const ACCESS_CODE = { 'full-text': 'F', abstract: 'A', 'via-secondary': 'S', 'not-read': 'N' };
+const ACCESS_FROM = { F: 'full-text', A: 'abstract', S: 'via-secondary', N: 'not-read' };
+const VERDICT_CODE = { supports: 'S', refutes: 'R', 'not-enough-info': 'N', unclear: '' };
+const VERDICT_FROM = { S: 'supports', R: 'refutes', N: 'not-enough-info', '': 'unclear' };
+
+export function encodeCompact(e) {
+  const o = {
+    k: e.key, c: e.claim,
+    s: e.source?.author_year || e.source?.doi || '',
+    a: ACCESS_CODE[e.access] || 'N',
+    e: e.evidence_line || '',
+  };
+  if (e.source?.doi) o.d = e.source.doi;
+  if (e.via) o.v = e.via;
+  if (e.verdict && e.verdict !== 'unclear') o.x = VERDICT_CODE[e.verdict];
+  if (e.load_bearing) o.l = 1;
+  // agent and occasion live in the header, not on every row — SEPIO treats them as part of the
+  // assertion's identity, but they are constant across one author's ledger.
+  if (e.asserted_by && e.asserted_by !== LEDGER_DEFAULT_AGENT) o.by = e.asserted_by;
+  if (e.asserted_at && e.asserted_at !== LEDGER_DEFAULT_AT) o.at = e.asserted_at;
+  return o;
+}
+
+export function decodeRecord(o) {
+  // compact
+  if (o.k !== undefined && o.claim === undefined) {
+    return {
+      key: o.k, claim: o.c || '',
+      asserted_by: o.by || LEDGER_DEFAULT_AGENT, asserted_at: o.at || LEDGER_DEFAULT_AT,
+      source: { doi: o.d || null, author_year: o.s || null, title: null },
+      access: ACCESS_FROM[o.a] || 'not-read',
+      via: o.v || null, evidence_line: o.e || null,
+      verdict: VERDICT_FROM[o.x ?? ''] || 'unclear',
+      load_bearing: !!o.l,
+    };
+  }
+  // legacy verbose
+  return {
+    key: o.key, claim: o.claim || '',
+    asserted_by: o.asserted_by || LEDGER_DEFAULT_AGENT, asserted_at: o.asserted_at || LEDGER_DEFAULT_AT,
+    source: o.source || { doi: null, author_year: null, title: null },
+    access: o.access || 'not-read', via: o.via || null,
+    evidence_line: o.evidence_line || null,
+    verdict: o.verdict || 'unclear', load_bearing: !!o.load_bearing,
+  };
+}
+
+export const LEDGER_DEFAULT_AGENT = 'draft';
+export const LEDGER_DEFAULT_AT = '';
+
+// Generated view for humans and prompts. Markdown table measured at −61% against verbose JSONL.
+export function ledgerToMarkdown(entries) {
+  const rows = ['| key | access | source | line | verdict | lb | via | claim |', '|---|---|---|---|---|---|---|---|'];
+  for (const e of entries) {
+    rows.push('| ' + [
+      e.key, ACCESS_CODE[e.access] || 'N', e.source?.author_year || e.source?.doi || '—',
+      e.evidence_line || '—', VERDICT_CODE[e.verdict] || '—', e.load_bearing ? 'Y' : '',
+      e.via || '', "'" + String(e.claim).replace(/\|/g, '/').replace(/\n/g, ' ') + "'",
+    ].join(' | ') + ' |');
+  }
+  return rows.join('\n');
+}
+
+/* ============================ 5c. reconciliation ============================ */
+// The gap: a ledger entry is keyed on its claim text, so editing the claim in the draft silently
+// orphans the entry — it stops applying, and nothing says so. Closed by matching on similarity
+// rather than identity, and reporting all three outcomes rather than only the happy path.
+
+const STOPWORDS = new Set(('a an the and or but if of to in on at by for with from as is are was were be been '
+  + 'being this that these those it its their his her our your we they he she not no than then so such').split(' '));
+
+export function claimTokens(s) {
+  return new Set(String(s || '').toLowerCase()
+    .replace(/[^\p{L}\p{N} ]+/gu, ' ').split(/\s+/)
+    .filter(w => w && !STOPWORDS.has(w)));
+}
+
+// Jaccard says "these are the same claim"; containment says "one still contains the other", which
+// is what a truncation or a one-clause edit looks like. Plain containment is dangerous on short
+// claims though — a six-word claim whose words all appear in a long sentence scores 1.0, which
+// produced a confident false match between "rewards d = -0.40" and an unrelated sentence. So
+// containment is scaled by the length ratio: it only counts for what the two actually share.
+export function similarity(a, b) {
+  const A = claimTokens(a), B = claimTokens(b);
+  if (!A.size || !B.size) return 0;
+  let inter = 0;
+  for (const w of A) if (B.has(w)) inter++;
+  const union = A.size + B.size - inter;
+  const jaccard = inter / union;
+  const containment = inter / Math.min(A.size, B.size);
+  const ratio = Math.min(A.size, B.size) / Math.max(A.size, B.size);
+  return 0.5 * jaccard + 0.5 * containment * ratio;
+}
+
+export const RECONCILE = { SAME: 0.75, DRIFTED: 0.45 };
+
+export function reconcile(entries, draft) {
+  // candidate claims from the draft: sentences and list items long enough to be a claim
+  const candidates = [];
+  for (const para of String(draft || '').split(/\n\s*\n/)) {
+    const clean = para.replace(/^(?:>\s*)+/gm, '').replace(/^(?:[-*]|\d+\.)\s+/gm, '')
+      .replace(/\|.*\|/g, ' ').replace(/\s+/g, ' ').trim();
+    for (const s of clean.split(/(?<=[.!?])\s+(?=[A-Z"“(*])/)) {
+      const t = s.trim();
+      if (t.length >= 30 && !t.startsWith('#')) candidates.push(t);
+    }
+  }
+
+  const matched = [], drifted = [], stale = [], seen = new Set();
+  for (const e of entries) {
+    let best = null, bestScore = 0;
+    for (const c of candidates) {
+      const s = similarity(e.claim, c);
+      if (s > bestScore) { bestScore = s; best = c; }
+    }
+    if (bestScore >= RECONCILE.SAME) { matched.push({ entry: e, draft: best, score: +bestScore.toFixed(2) }); seen.add(best); }
+    else if (bestScore >= RECONCILE.DRIFTED) { drifted.push({ entry: e, draft: best, score: +bestScore.toFixed(2) }); seen.add(best); }
+    else stale.push({ entry: e, nearest: best, score: +bestScore.toFixed(2) });
+  }
+  const unmatchedDraft = candidates.filter(c => !seen.has(c));
+  return { matched, drifted, stale, unmatchedDraft, candidates: candidates.length };
+}
+
+/* ============================ 6b. quote verification ============================ */
+// Deterministic, no model. Two independent implementations converge on the same rules and both
+// report it as a solved problem: pagecite (PyPI) and citefact (PyPI) each compare a draft's
+// quotations against the source text and classify verified / modified / not-found. Measured base
+// rate from a production sample (wyper.io, n=513 readable pages): **6.43% of cited quotes were not
+// on the page, upper 95% bound 8.56%** — one in fifteen, so this earns a check.
+//
+// Normalisation rules taken from pagecite, because each one is a real failure mode it names:
+//   - ignore case, punctuation and spacing
+//   - fold ligatures (ﬁ -> fi)
+//   - rejoin words split across a line break ("con-\nstraint" -> "constraint")
+//   - normalise thousands separators (3,200 = 3200)
+//   - **keep decimal points**, so "4.2" can never match "42"  <- the one that matters most
+//   - an ellipsis splits the quote into parts that must appear IN ORDER
+//   - a quote under four words is too short to prove anything
+// citefact's structural rule is adopted too: text inside code fences and tables is never scanned.
+
+const LIGATURES = { '\uFB00': 'ff', '\uFB01': 'fi', '\uFB02': 'fl', '\uFB03': 'ffi', '\uFB04': 'ffl', '\uFB05': 'st', '\uFB06': 'st' };
+
+export function normaliseQuote(s) {
+  return String(s || '')
+    .replace(/[\uFB00-\uFB06]/g, c => LIGATURES[c] || c)
+    .replace(/(\p{L})-\s*\n\s*(\p{L})/gu, '$1$2')      // hyphenated line break
+    .replace(/(\d),(?=\d{3}(?!\d))/g, '$1')             // thousands separators
+    .replace(/(\d)\.(?=\d)/g, '$1\u0001')               // protect decimal points
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\u0001]+/gu, ' ')
+    .replace(/\u0001/g, '.')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const wordCount = s => String(s || '').trim().split(/\s+/).filter(Boolean).length;
+
+// Inline quotations only: "..." and “…”. Block quotes ("> ") are deliberately excluded for now —
+// in a house style that also uses them for callouts, scanning them produces mostly noise, and a
+// check that cries wolf is worse than one that does not run.
+export function extractQuotes(markdown = '') {
+  const out = [];
+  let inFence = false;
+  for (const line of String(markdown).split('\n')) {
+    if (/^```/.test(line.trim())) { inFence = !inFence; continue; }
+    if (inFence) continue;
+    if (line.trim().startsWith('|')) continue;           // table row
+    // Minimum 4 characters, not 12: a short quotation must still be *seen* so it can be reported
+    // as too short to prove anything. A floor high enough to filter those out made the too-short
+    // verdict unreachable, which is the wrong silence.
+    const re = /["\u201C]([^"\u201C\u201D]{4,400})["\u201D]/g;
+    let m;
+    while ((m = re.exec(line))) {
+      const quote = m[1].trim();
+      const words = wordCount(quote);
+      out.push({ quote, words, tooShort: words < 4, context: line });
+    }
+  }
+  return out;
+}
+
+export function verifyQuote(quote, corpusText) {
+  if (wordCount(quote) < 4) return { status: 'too-short', why: 'under four words proves nothing' };
+  const parts = String(quote).split(/\u2026|\.\.\./).map(normaliseQuote).filter(p => p.length > 8);
+  if (!parts.length) return { status: 'too-short', why: 'no usable fragment' };
+  const hay = normaliseQuote(corpusText);
+  let pos = 0;
+  for (const p of parts) {
+    const i = hay.indexOf(p, pos);
+    if (i < 0) return { status: 'not-found', part: parts.length > 1 ? p.slice(0, 90) : undefined };
+    pos = i + p.length;
+  }
+  return { status: 'verified', parts: parts.length };
+}
+
+// A citation marker near the quote. This is what separates a quotation from a scare quote, a
+// rhetorical question in quotation marks, or the words of a prayer — none of which are claims about
+// a source and none of which should be reported as unverified. Measured need: on a real draft, 69
+// inline quotes yielded 34 "not found" of which most were the author's own emphasis.
+const CITE_NEAR = new RegExp(String.raw`\b${NAME}\s*(?:et\s+al\.?,?\s*)?[,(]?\s*(?:19|20)\d{2}\b`
+  + String.raw`|\((?:[^()]{0,90}?)(?:19|20)\d{2}[^()]{0,30}\)`
+  + String.raw`|§+\s*\d`
+  + String.raw`|\bCCC\s*\d`, 'i');
+
+// Verify every inline quote in a draft against a corpus of plain-text sources.
+export function quoteReport(markdown, corpusText) {
+  const quotes = extractQuotes(markdown);
+  const results = quotes.map(q => {
+    if (q.tooShort) return { ...q, status: 'too-short', why: 'under four words proves nothing' };
+    if (!CITE_NEAR.test(q.context || '')) {
+      return { ...q, status: 'unattributed',
+        why: 'no citation in the same sentence — the author\'s own words, a prayer text, or a scare quote' };
+    }
+    return { ...q, ...verifyQuote(q.quote, corpusText) };
+  });
+  return {
+    total: results.length,
+    verified: results.filter(r => r.status === 'verified').length,
+    notFound: results.filter(r => r.status === 'not-found'),
+    unattributed: results.filter(r => r.status === 'unattributed').length,
+    tooShort: results.filter(r => r.status === 'too-short').length,
+    results,
+  };
+}
+
+/* ============================ 6c. citation / reference symmetry ============================ */
+// citefact's two cheapest findings, both deterministic and both free:
+//   orphan_citation   — an in-text citation with no bibliography entry (the fabricated-citation signal)
+//   uncited_reference — a bibliography entry never cited in the text
+// A quotation that is perfectly verbatim in the right source is still a defect if its bibliography
+// entry does not exist, and this is the only check here that needs no source text at all.
+
+function sourcesBlock(markdown) {
+  const lines = String(markdown).split('\n');
+  let i = lines.findIndex(l => /^#{1,6}\s+\**\s*sources\b/i.test(l.trim()) || /^\**sources:?\**$/i.test(l.trim()));
+  if (i < 0) return [];
+  const out = [];
+  for (let j = i + 1; j < lines.length; j++) {
+    const l = lines[j];
+    if (/^#{1,6}\s/.test(l.trim())) break;
+    const m = /^\s*[-*]\s+(.*)$/.exec(l);
+    if (m) out.push(m[1]);
+    else if (out.length && /^\s{2,}\S/.test(l)) out[out.length - 1] += ' ' + l.trim();  // wrapped entry
+  }
+  return out;
+}
+
+// An entry can legitimately cover several years — "Pew Research Center (2009) … and (2016)" is one
+// source cited twice — so return every year it names rather than only the first. Returning one
+// made "Pew 2016" look like an orphan citation when its reference entry existed.
+function surnameYearsFromEntry(entry) {
+  // An entry may be a semicolon-separated list — "- Calvert & Tart (1993); Rainey & Larsen (2002);
+  // Kilgour et al. (2000); …" is one bullet carrying four citations. Splitting first is essential:
+  // truncating at the first year made every citation after the first look like an orphan.
+  const parts = String(entry).split(/;\s*/).filter(p => /\b(?:19|20)\d{2}\b/.test(p));
+  const out = [];
+  for (const part of parts) {
+    const stop = part.search(/\((?:19|20)\d{2}|(?:19|20)\d{2}/);
+    const phrase = (stop > 0 ? part.slice(0, stop) : part).replace(/^[-–—*\s]+/, '').replace(/[*_`]/g, ' ').trim();
+    if (!phrase) continue;
+    const words = nameWords(phrase);
+    if (!words.size) continue;
+    const years = [...new Set([...part.matchAll(/\(((?:19|20)\d{2})[a-z]?\)/g)].map(m => m[1]))];
+    if (!years.length) continue;
+    // Author-like, so that a title-only entry is not reported as an uncited reference under a
+    // meaningless label like "initiating 2020". A real author/institution prefix has a comma, an
+    // ampersand, "et al", an institution noun, or capitalises nearly all of its content words;
+    // a title set in italics or quotes does not.
+    const contentWords = [...phrase.matchAll(/\p{L}[\p{L}'\u2019-]*/gu)].length;
+    const capWords = [...phrase.matchAll(/\p{Lu}[\p{L}'\u2019-]*/gu)].length;
+    const authorLike = !/^[*"\u201C']/.test(part.trim())
+      && (/[,&]/.test(phrase) || /\bet al\b/.test(phrase)
+        || [...INST_WORD].some(w => phrase.includes(w))
+        || capWords >= Math.max(1, contentWords * 0.6));
+    const label = (/[A-Z][A-Za-z'\u2019-]{2,}/.exec(phrase) || [])[0]
+      || [...words].slice(0, authorLike ? 1 : 3).join(' ');
+    for (const y of years) out.push({ name: label, year: y, label: `${label} ${y}`, words, authorLike });
+  }
+  return out;
+}
+
+// Containment, either direction: "Pew" ⊂ "Pew Research Center", and "rainey" ⊂ "Rainey, D. W.,
+// & Larsen, J. D.". Exact string equality was the bug — it made every institution and every
+// multi-author entry an orphan.
+function nameMatches(a, b) {
+  if (!a.size || !b.size) return false;
+  const [small, big] = a.size <= b.size ? [a, b] : [b, a];
+  for (const w of small) if (!big.has(w)) return false;
+  return true;
+}
+
+export function citationSymmetry(markdown) {
+  const entries = sourcesBlock(markdown);
+  const listed = entries.flatMap(surnameYearsFromEntry);
+  const cited = citedAuthorYears(markdown);
+
+  const orphans = cited.filter(c => !listed.some(l => l.year === c.year && nameMatches(c.words || new Set([c.name.toLowerCase()]), l.words)));
+  // Only author-like entries: a title-only reference appearing as "uncited" is usually a document
+  // the author cited by title rather than by name, and reporting it under a three-word title label
+  // adds noise without adding a defect.
+  const uncited = listed.filter(l => l.authorLike
+    && !cited.some(c => c.year === l.year && nameMatches(c.words || new Set([c.name.toLowerCase()]), l.words)));
+
+  return { entries: entries.length, listed: listed.length, cited: cited.length, orphans, uncited };
+}
+
+/* ============================ 7. how a paper is actually cited ============================ */
 // Semantic Scholar returns `contexts` — the verbatim sentences in which a citing paper refers to
 // this one — plus `intents`. Probed keyless on 2026-10-29: no key or proxy needed for this
 // endpoint. Useful for asking "is this paper commonly misquoted?" before relying on it; it is a
@@ -718,7 +1081,10 @@ async function main() {
     const has = name => args.includes('--' + name);
     const ledgerPath = get('ledger', get('draft') ? get('draft') + '.claims.jsonl' : 'claims.jsonl');
     const read = () => fs.existsSync(ledgerPath)
-      ? fs.readFileSync(ledgerPath, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))
+      ? fs.readFileSync(ledgerPath, 'utf8').split('\n').filter(Boolean)
+          .map(l => { try { return JSON.parse(l); } catch { return null; } })
+          .filter(o => o && !o.z)                                  // skip the header line
+          .map(decodeRecord)
       : [];
 
     if (sub === 'add') {
@@ -736,7 +1102,28 @@ async function main() {
           agent: get('agent', get('draft') || 'draft'),
         });
       } catch (e) { console.error(e.message); process.exit(2); }
-      fs.appendFileSync(ledgerPath, JSON.stringify(rec) + '\n');
+
+      // Near-duplicate guard: without it, editing a claim's wording appends a second entry and the
+      // old one silently keeps failing. --replace overwrites the near match instead.
+      const existing = read();
+      let near = null, nearScore = 0;
+      for (const old of existing) {
+        const s = similarity(old.claim, rec.claim);
+        if (s > nearScore) { nearScore = s; near = old; }
+      }
+      if (near && nearScore >= RECONCILE.SAME) {
+        if (!has('replace')) {
+          console.error(`near-duplicate of ${near.key} (similarity ${nearScore.toFixed(2)}) — `
+            + `pass --replace to update that entry instead of appending a second one.`);
+          process.exit(2);
+        }
+        const kept = existing.filter(e => e.key !== near.key);
+        fs.writeFileSync(ledgerPath, kept.map(e => JSON.stringify(encodeCompact(e))).join('\n') + (kept.length ? '\n' : ''));
+        fs.appendFileSync(ledgerPath, JSON.stringify(encodeCompact(rec)) + '\n');
+        console.log(`replaced ${near.key} -> ${rec.key}  access=${rec.access}`);
+        return;
+      }
+      fs.appendFileSync(ledgerPath, JSON.stringify(encodeCompact(rec)) + '\n');
       console.log(`added ${rec.key}  access=${rec.access}  line=${rec.evidence_line || '\u2014'}`);
       return;
     }
@@ -745,6 +1132,7 @@ async function main() {
       const entries = read();
       if (!entries.length) { console.log(`no ledger at ${ledgerPath}`); return; }
       if (sub === 'list') {
+        if (has('md')) { console.log(ledgerToMarkdown(entries)); return; }
         for (const e of entries) {
           console.log(`${e.key}  ${e.access.padEnd(13)} ${String(e.verdict).padEnd(14)} ${e.load_bearing ? 'LOAD-BEARING ' : ''}${e.source?.author_year || e.source?.doi || '\u2014'}`);
           console.log(`            ${e.claim.replace(/\s+/g, ' ').slice(0, 150)}`);
@@ -763,6 +1151,21 @@ async function main() {
           `\u2014 a completeness backlog, not errors.`);
         for (const u of r.unaccounted.slice(0, 12)) console.log(`    \u00b7 ${u.label}`);
         if (r.unaccounted.length > 12) console.log(`    \u2026 and ${r.unaccounted.length - 12} more`);
+
+        // Reconciliation — the gap that made a stale entry fail silently.
+        const rc = reconcile(entries, draft);
+        console.log(`\n  reconciliation against ${rc.candidates} draft claim(s):`);
+        console.log(`    ${rc.matched.length} matched \u00b7 ${rc.drifted.length} drifted \u00b7 ${rc.stale.length} stale \u00b7 ${rc.unmatchedDraft.length} draft claims unledgered`);
+        for (const d of rc.drifted) {
+          console.log(`    DRIFTED (${d.score}) ${d.entry.key}`);
+          console.log(`      ledger: ${d.entry.claim.replace(/\s+/g, ' ').slice(0, 110)}`);
+          console.log(`      draft : ${d.draft.replace(/\s+/g, ' ').slice(0, 110)}`);
+        }
+        for (const s of rc.stale) {
+          console.log(`    STALE   ${s.entry.key} \u2014 claim no longer in the draft (nearest ${s.score}):`);
+          console.log(`      ${s.entry.claim.replace(/\s+/g, ' ').slice(0, 120)}`);
+        }
+        if (has('strict-stale') && rc.stale.length) process.exit(1);
       }
       if (has('strict') && r.failures.length) process.exit(1);
       if (has('strict-incomplete') && r.unaccounted.length) process.exit(1);
@@ -771,6 +1174,45 @@ async function main() {
 
     console.error('usage: node tools/fidelity.mjs claim add|list|check ...');
     process.exit(2);
+  }
+
+  if (cmd === 'quotes') {
+    const fs = await import('node:fs');
+    const path = args[1];
+    const corpusDir = (() => { const i = args.indexOf('--corpus'); return i >= 0 ? args[i + 1] : ''; })();
+    if (!path) { console.error('usage: node tools/fidelity.mjs quotes <draft.md> --corpus <dir>'); process.exit(2); }
+    if (!corpusDir || !fs.existsSync(corpusDir)) {
+      console.error('--corpus <dir> is required: quote verification compares against source text you already have.');
+      process.exit(2);
+    }
+    const files = fs.readdirSync(corpusDir).filter(f => /\.(txt|md|text)$/i.test(f));
+    const corpus = files.map(f => fs.readFileSync(`${corpusDir}/${f}`, 'utf8')).join('\n\n');
+    const r = quoteReport(fs.readFileSync(path, 'utf8'), corpus);
+    console.log(`${r.total} inline quote(s) \u00b7 ${r.verified} verified \u00b7 ${r.notFound.length} not found `
+      + `\u00b7 ${r.unattributed} unattributed \u00b7 ${r.tooShort} too short`);
+    console.log(`corpus: ${files.length} file(s), ${corpus.length} chars`);
+    console.log('(a quote is only checked when a citation sits in the same sentence; '
+      + 'unattributed quotes are your own words or a prayer text, not claims about a source)\n');
+    for (const n of r.notFound) {
+      console.log(`  NOT FOUND  ${n.quote.replace(/\s+/g, ' ').slice(0, 140)}`);
+      if (n.part) console.log(`             missing fragment: ${n.part}`);
+    }
+    if (process.argv.includes('--strict') && r.notFound.length) process.exit(1);
+    return;
+  }
+
+  if (cmd === 'refs') {
+    const fs = await import('node:fs');
+    const path = args[1];
+    if (!path) { console.error('usage: node tools/fidelity.mjs refs <draft.md>'); process.exit(2); }
+    const s = citationSymmetry(fs.readFileSync(path, 'utf8'));
+    console.log(`${s.entries} reference entries \u00b7 ${s.cited} in-text citations`);
+    console.log(`  ${s.orphans.length} orphan citation(s) \u2014 cited but not in Sources`);
+    for (const o of s.orphans.slice(0, 15)) console.log(`    \u00b7 ${o.label}`);
+    console.log(`  ${s.uncited.length} uncited reference(s) \u2014 in Sources but never cited`);
+    for (const u of s.uncited.slice(0, 15)) console.log(`    \u00b7 ${u.label}`);
+    if (process.argv.includes('--strict') && (s.orphans.length || s.uncited.length)) process.exit(1);
+    return;
   }
 
   console.log(`fidelity — citation-integrity checks

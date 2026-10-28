@@ -12,6 +12,8 @@
 
 import {
   classifyRetraction, detectAttributions, claimScope, auditSentence, auditDraft, checkDoi,
+  similarity, reconcile, RECONCILE, encodeCompact, decodeRecord, ledgerToMarkdown, claimTokens,
+  normaliseQuote, extractQuotes, verifyQuote, quoteReport, citationSymmetry,
 } from '../tools/fidelity.mjs';
 
 let pass = 0, fail = 0;
@@ -345,6 +347,203 @@ ok(citedAuthorYears('').length === 0, 'empty draft yields nothing');
 /* =====================================================================================
    8. HOW A PAPER IS ACTUALLY CITED — pure mapper, needs no network.
    ===================================================================================== */
+section('9. compact ledger encoding');
+
+{
+  const full = {
+    key: 'abc123def456',
+    claim: 'Automaticity reaches 95% of asymptote at a median 66 days',
+    asserted_by: 'habits/prayer.md', asserted_at: '2026-10-29T00:00:00.000Z',
+    source: { doi: '10.1002/acp.1638', author_year: 'Lally 2010', title: 'How are habits formed' },
+    access: 'abstract', via: null, evidence_line: 'Lally 2010', verdict: 'unclear', load_bearing: true,
+  };
+  const c = encodeCompact(full);
+  const back = decodeRecord(c);
+  ok(back.key === full.key && back.access === 'abstract' && back.load_bearing === true,
+    'compact round-trips to the same assertion');
+  ok(back.source.doi === '10.1002/acp.1638' && back.source.author_year === 'Lally 2010',
+    'DOI and author-year survive');
+  ok(back.verdict === 'unclear', 'an unclear verdict is omitted on disk and restored on read');
+  ok(!('x' in c) && !('v' in c), 'default fields are omitted, not written as null');
+
+  // Legacy verbose records must keep working: a ledger written before this change is still valid.
+  const legacy = decodeRecord({ key: 'k1', claim: 'x', source: { doi: null, author_year: 'Pew 2016', title: null },
+    access: 'not-read', via: null, evidence_line: null, verdict: 'unclear', load_bearing: false });
+  ok(legacy.access === 'not-read' && legacy.source.author_year === 'Pew 2016',
+    'legacy verbose records decode unchanged');
+
+  // All four access levels must survive the enum encoding — a silently unmapped level would
+  // downgrade to not-read and fail closed for the wrong reason.
+  for (const [a, code, back2] of [['full-text','F','full-text'],['abstract','A','abstract'],
+      ['via-secondary','S','via-secondary'],['not-read','N','not-read']]) {
+    ok(encodeCompact({ ...full, access: a }).a === code && decodeRecord({ ...c, a: code }).access === back2,
+      `access "${a}" encodes as "${code}" and decodes back`);
+  }
+
+  const md = ledgerToMarkdown([back]);
+  ok(md.split('\n').length === 3 && md.includes('| abc123def456 |'), 'markdown view renders one row plus header');
+  ok(md.includes("'Automaticity"), 'claim text is quoted so a pipe in prose cannot break the table');
+}
+
+section('10. similarity and reconciliation');
+
+{
+  // The three outcomes the CLI must distinguish, using the real corrected claims.
+  const same = similarity(
+    'Compulsory family worship was more detrimental than no family worship at all',
+    'Compulsory family worship was more detrimental than no family worship at all.');
+  ok(same >= RECONCILE.SAME, 'identical wording scores as SAME', String(same.toFixed(2)));
+
+  const edited = similarity(
+    'Automaticity reaches 95% of asymptote at a median 66 days',
+    'Automaticity reaches 95% of asymptote at a median of 66 days');
+  ok(edited >= RECONCILE.SAME, 'a one-word insertion still reads as the same claim', String(edited.toFixed(2)));
+
+  const different = similarity(
+    'Engagement-contingent rewards d = -0.40',
+    'So treat the range as the claim, not a precise median, because it varies enormously');
+  ok(different < RECONCILE.DRIFTED,
+    'a short claim is NOT matched to a long unrelated sentence', String(different.toFixed(2)));
+
+  const drift = similarity(
+    'Warmth and closeness predicted continuation of family worship',
+    'Warmth and closeness predicted continuation of family religious practice');
+  ok(drift >= RECONCILE.DRIFTED, 'a substituted clause registers as DRIFTED, not SAME', String(drift.toFixed(2)));
+
+  const entries = [
+    { claim: 'Warmth and closeness predicted continuation; 3,000 participants over three decades', key: 'a' },
+    { claim: 'Automaticity reaches 95% of asymptote at a median of 66 days', key: 'b' },
+    { claim: '78% of the unaffiliated were raised in highly religious families', key: 'c' },
+  ];
+  const draft = [
+    '# Part 3',
+    '',
+    'Warmth and closeness predicted continuation; 3,000 participants over three decades.',
+    '',
+    'Automaticity reaches 95% of asymptote at a median 66 days, per the fitted curve.',
+    '',
+    'A completely different paragraph about liturgical participation and singing.',
+  ].join('\n');
+  const r = reconcile(entries, draft);
+  ok(r.matched.length === 1, 'the unchanged claim reconciles as MATCHED', `got ${r.matched.length}`);
+  ok(r.drifted.length === 1 && r.drifted[0].entry.key === 'b',
+    'the edited claim is reported as DRIFTED, not silently dropped');
+  ok(r.stale.length === 1 && r.stale[0].entry.key === 'c',
+    'a claim removed from the draft is reported STALE rather than failing silently');
+  ok(r.unmatchedDraft.length === 1, 'the unrelated draft sentence is not claimed as a match');
+}
+
+section('11. quote normalisation (pagecite rules)');
+
+{
+  ok(normaliseQuote('The  Memorization\nof   basic prayers') === 'the memorization of basic prayers',
+    'case, punctuation and whitespace are ignored');
+  ok(normaliseQuote('the con-\nstraint hypothesis') === 'the constraint hypothesis',
+    'a hyphenated line break is rejoined');
+  ok(normaliseQuote('the \uFB01rst \uFB02ow') === 'the first flow', 'ligatures fold to plain letters');
+  ok(normaliseQuote('3,200 families') === '3200 families', 'thousands separators normalise');
+  ok(normaliseQuote('a value of 4.2') === 'a value of 4.2', 'a decimal point survives');
+  ok(normaliseQuote('a value of 4.2') !== normaliseQuote('a value of 42'),
+    'DECIMAL GUARD: 4.2 can never match 42 \u2014 the failure that silently verifies a wrong figure');
+}
+
+section('12. quote verification');
+
+{
+  const corpus = 'The memorization of basic prayers offers an essential support to the life of prayer,\n'
+    + 'but it is important to help learners savor their meaning. The family is the first place\n'
+    + 'where children learn to pray. Reported at 4.2 percent in the sample.';
+
+  ok(verifyQuote('the memorization of basic prayers offers an essential support to the life of prayer', corpus).status === 'verified',
+    'verbatim quote verifies');
+  ok(verifyQuote('The Family Is The First Place Where Children Learn To Pray', corpus).status === 'verified',
+    'case-different quote still verifies');
+  ok(verifyQuote('the memorization of formal prayers offers a vital support to the life of prayer', corpus).status === 'not-found',
+    'adjectives swapped = not found (the modified-quote class)');
+  ok(verifyQuote('children who pray nightly are forty percent more likely to remain practicing', corpus).status === 'not-found',
+    'a fabricated quotation is caught');
+  ok(verifyQuote('a figure of 42 percent', corpus).status === 'not-found',
+    'DECIMAL GUARD end-to-end: "42" does not verify against "4.2"');
+  ok(verifyQuote('basic prayers', corpus).status === 'too-short',
+    'under four words is refused rather than credited');
+
+  const ell = verifyQuote('basic prayers \u2026 help learners savor their meaning', corpus);
+  ok(ell.status === 'verified' && ell.parts === 2, 'an ellipsis verifies when both parts appear');
+  const backwards = verifyQuote('savor their meaning \u2026 basic prayers', corpus);
+  ok(backwards.status === 'not-found', 'ELLIPSIS ORDER: reversed parts must not verify');
+
+  // Attribution gating: only a quote with a citation beside it is a claim about a source. Without
+  // this the real document produced 34 "not found" flags, most of them its own emphasis.
+  const doc = [
+    'The Catechism says "the memorization of basic prayers offers an essential support to the life of prayer" (CCC 2688).',
+    'So ask yourself "how do I motivate him?" and mean it.',
+    'The words are "Our Father, who art in heaven" and they are prayed, not cited.',
+    'A scare quote: the summary says "compulsory worship is worse than none" (Lee 1997), but no source says that.',
+  ].join('\n');
+  const qr = quoteReport(doc, corpus);
+  ok(qr.verified === 1, 'the attributed quote verifies against the corpus', `verified=${qr.verified}`);
+  ok(qr.notFound.length === 1 && /compulsory worship/.test(qr.notFound[0].quote),
+    'a scare-quoted paraphrase is flagged as not found');
+  ok(qr.unattributed === 2, 'a rhetorical question and a prayer text are unattributed, not failures',
+    `unattributed=${qr.unattributed}`);
+}
+
+section('13. quote extraction');
+
+{
+  const md = [
+    'Prose with "a real quotation of several words here" inline.',
+    '```',
+    'const x = "a quoted string inside code must be ignored";',
+    '```',
+    '| a | "a quoted string in a table must be ignored" |',
+    '> a block quote is not scanned as an inline quote',
+  ].join('\n');
+  const q = extractQuotes(md);
+  ok(q.length === 1, 'only the inline prose quotation is extracted', `got ${q.length}`);
+  ok(/a real quotation/.test(q[0].quote), 'the extracted text is the right one');
+  ok(extractQuotes('He said "tiny".')[0].tooShort === true, 'a three-word quote is flagged too short');
+}
+
+section('14. citation / reference symmetry');
+
+{
+  const md = [
+    '# Doc',
+    '',
+    'Findings (Dollahite & Thatcher 2008; Smith & Denton 2005) and a claim (Pew Research Center 2016).',
+    'Tier label row: | Research, Dollahite 2019; §3.3a | must not create an author called Research.',
+    'A mid-list capture: (Dollahite, Marks, Babcock, Barrow & Rose 2019) is Dollahite, not Babcock.',
+    'Absent source (Nowhere 1999) is cited but never listed.',
+    'Unused source is listed but never cited.',
+    '',
+    '## Sources',
+    '',
+    '- Dollahite, D. C., & Thatcher, J. Y. (2008). *Family religiosity*.',
+    '- Smith, C., & Denton, M. L. (2005). *Soul Searching*.',
+    '- Pew Research Center (2009). *Faith in Flux*. \u2014 and (2016). *Why America\'s nones left*.',
+    '- Dollahite, D. C., Marks, L. D., Babcock, K. P., Barrow, B. H., & Rose, A. H. (2019). *Beyond religious*.',
+    '- Calvert & Tart (1993); Rainey & Larsen (2002); Kilgour et al. (2000).',
+    '- Chelladurai, J. M., Dollahite, D. C., & Marks, L. D. (2018). *The Family That Prays Together*.',
+    '- Goldman, R. (1964). *Religious Thinking*. Routledge (reissued 2022).',
+  ].join('\n');
+  const s = citationSymmetry(md);
+
+  ok(s.orphans.length === 1 && s.orphans[0].name === 'Nowhere',
+    'exactly the one genuinely missing source is an orphan', JSON.stringify(s.orphans.map(o => o.label)));
+  ok(!s.orphans.some(o => o.name === 'Research'), 'a tier label is not reported as an author');
+  ok(!s.orphans.some(o => o.name === 'Babcock'), 'a mid-list capture is not reported as the surname');
+  ok(!s.orphans.some(o => o.name === 'Reading'), 'an italic title is not reported as an author');
+  ok(!s.orphans.some(o => o.name === 'Center'), 'an institution is matched by its full phrase, not its last word');
+  ok(s.uncited.some(u => u.name === 'Chelladurai'), 'a listed-but-never-cited source is reported');
+  ok(!s.uncited.some(u => /2022/.test(u.label)),
+    'REISSUE YEAR: "(reissued 2022)" is not read as a second citation year');
+  ok(s.uncited.filter(u => u.name === 'Goldman').length === 1,
+    'the reissued book yields one entry (1964), not two');
+  ok(!s.uncited.some(u => u.name === 'Kilgour'),
+    'a semicolon-separated bullet lists every citation, not just the first');
+}
+
 section('8. citation contexts (pure)');
 import { citationContexts } from '../tools/fidelity.mjs';
 ok(typeof citationContexts === 'function', 'citationContexts is exported');

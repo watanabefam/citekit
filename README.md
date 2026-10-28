@@ -329,10 +329,10 @@ node tools/fidelity.mjs doi 10.1378/chest.128.6.3817        # retraction + scope
 node tools/fidelity.mjs screen DOI [DOI...]                # batched, one metered call
 node tools/fidelity.mjs draft ../family/habits/prayer.md   # audit prose
 node tools/fidelity.mjs draft FILE --strict                # exit 1 on an undeclared relay
-node tests/fidelity.mjs [--live]                           # 55 assertions, 3 live probes
+node tests/fidelity.mjs [--live]                           # 123 assertions, 3 live probes
 ```
 
-**Four checks, each a separate failure.** They are pure functions over already-fetched payloads, so
+**Six checks, each a separate failure.** They are pure functions over already-fetched payloads, so
 the suite needs no network except the three `--live` probes.
 
 1. **Retraction** — `classifyRetraction({crossref, openalex})`. Three signals, because no single one
@@ -387,9 +387,95 @@ not failures** — 52 of them on a real draft, which as "errors" would make the 
 
 **What the ledger cannot do.** It records a verdict; it never predicts one. SciFact/SCIVER (Wadden
 et al., EMNLP 2020) is the reference task for claim verification, and its leaderboard tops out near
-**46% F1** — a coin-flip for three-way SUPPORTS/REFUTES/NOT-ENOUGH-INFO. An automated verdict here
+**46% F1** — a coin-flip for three-way SUPPORTS/REFUTES/NOT_ENOUGH-INFO. An automated verdict here
 would be worse than no tool, because it would be believed. It also only helps if it is filled in:
 it is a discipline aid, not a detector.
+
+### Keeping the ledger cheap
+
+A ledger that costs context on every read will not be maintained. Measured with `o200k_base` on a
+realistic 100-claim ledger:
+
+| View | tokens | vs verbose |
+|---|---|---|
+| verbose JSONL (the original format) | 13,474 | — |
+| compact JSON | 6,015 | **−55%** |
+| pipe-positional | 4,645 | −66% |
+| markdown table | 5,313 | −61% |
+| **the report alone** | **125** | **−99%** |
+
+The lesson is that the encoding is the small lever and the interface is the large one. So:
+**compact JSON is the store** (short keys, one-character enums, defaults omitted — no delimiter
+escaping to get wrong, and still extensible), and markdown is a **generated view** for a human or a
+prompt. Legacy verbose records still read, so an existing ledger keeps working.
+
+The real rule is the last row: an agent should read `claim check`, which prints findings and counts,
+and never `cat` the ledger. That is a 99% saving for the same information.
+
+### Reconciliation — the gap that used to fail silently
+
+A ledger entry is keyed on its claim text, so **editing the claim in the draft orphaned the entry**
+and it stopped applying without saying so. Matching is now on similarity, not identity, and all
+three outcomes are reported:
+
+```bash
+node tools/fidelity.mjs claim check --ledger doc.claims.jsonl --draft doc.md
+#   reconciliation against 436 draft claim(s):
+#     3 matched · 1 drifted · 2 stale · 433 draft claims unledgered
+```
+
+| Outcome | Meaning | What to do |
+|---|---|---|
+| **matched** | the claim is in the draft, essentially unchanged | nothing |
+| **drifted** | similar but the wording moved | re-record it, or confirm the access level still holds |
+| **stale** | no longer in the draft at all | delete it, or find where it went |
+
+Similarity is `0.5 × Jaccard + 0.5 × containment × lengthRatio`. The length ratio is not decoration:
+plain containment scored **1.0** between a six-word claim and a long unrelated sentence that
+happened to contain all six words, which produced confident false matches. `claim add` runs the same
+test and refuses to append a near-duplicate unless you pass `--replace`.
+
+`--strict-stale` fails the build on stale entries; without it they are reported only.
+
+### Quote verification
+
+Deterministic, no model. Two independent implementations (`pagecite`, `citefact`) treat this as
+solved, and a production measurement (wyper.io, n=513 readable pages) puts the base rate at
+**6.43% of cited quotes not on the page** (upper 95% bound 8.56%) — one in fifteen.
+
+```bash
+node tools/fidelity.mjs quotes doc.md --corpus sources/
+```
+
+Normalisation follows `pagecite`, because each rule is a named failure mode: case/punctuation/
+whitespace ignored, ligatures folded (`ﬁ`→`fi`), line-broken words rejoined (`con-\nstraint`),
+thousands separators normalised — and **decimal points preserved, so `4.2` can never match `42`**.
+An ellipsis splits the quote into parts that must appear *in order*. Under four words is refused
+rather than credited.
+
+A quote is only checked when a **citation sits in the same sentence**. That gate is what separates a
+quotation from a scare quote, a rhetorical question, or the words of a prayer. Without it, the real
+draft produced 34 "not found" flags of which most were the author's own emphasis; with it, 6 — and
+of those, 4 were quotes from a source that simply was not in the corpus yet.
+
+### Citation / reference symmetry
+
+The two cheapest findings, both needing no source text at all:
+
+```bash
+node tools/fidelity.mjs refs doc.md
+#   39 reference entries · 42 in-text citations
+#   2 orphan citation(s) — cited but not in Sources
+#   1 uncited reference(s) — in Sources but never cited
+```
+
+An `orphan citation` is the fabricated-citation signal: prose cites a work the bibliography does not
+contain. Getting this to useful precision took four fixes, each found by running it on a real
+document and reading the output rather than the code — semicolon-separated bullets carry several
+citations; tier labels (`**Research**, Dollahite 2019`) are not authors; institutions are matched by
+full phrase, not by their last word; and a reissue year (`Routledge (reissued 2022)`) is not a second
+citation year. On the real draft those four took it from 23 orphans and 23 uncited to **2 and 1** —
+and both orphans were genuine.
 
 **Declared provenance downgrades rather than silences.** A sentence saying "second-hand",
 "abstract only", "not read" or "reported-not-verified" moves from HARD to ADVISORY: it is still
@@ -591,9 +677,12 @@ Rule of thumb: assemble if you mostly need *reading and citing*; keep this file 
    URL into Settings → Proxy URL. Built and verified locally against the real workerd runtime;
    only the deploy needs an account. While there: `wrangler secret put S2_KEY` and `CORE_KEY`
    so the two key-gated sources actually work.
-1b. ~~An access-level ledger for the confidence class~~ — **built** as `claim add|list|check`. Still
-   missing: a pre-commit hook, and any way to reconcile a ledger against a *changed* draft (edit a
-   claim and its `key` no longer matches, so the entry silently stops applying).
+1b. ~~An access-level ledger for the confidence class~~ — **built** as `claim add|list|check`, with
+   reconciliation, compact storage and quote/symmetry checks alongside. Still missing: a pre-commit
+   hook, a `quotes` mode that resolves each quote to *its own* cited source rather than one corpus
+   directory, block-quote scanning (deliberately deferred — in a house style that also uses `> ` for
+   callouts it is mostly noise), and page-level checking, which needs the source's page mapping and
+   is why `pagecite` reports `quote_page_mismatch` separately.
 2. A real screen-reader pass (VoiceOver/NVDA). The automated assertions cover roles, live regions,
    focus order and keyboard operability, but no screen reader has actually been driven.
 3. IndexedDB library with per-paper embeddings for large corpora.
