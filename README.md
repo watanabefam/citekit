@@ -227,6 +227,10 @@ Flags: `--per N` · `--sources csv` · `--oa-only` · `--year-from YYYY` · `--j
 Default sources are the keyless/CORS-open set; `s2`, `arxiv` (need the proxy), `core` (needs a key)
 and `web` (Tavily, keyless by default) are opt-in. `node tests/tools-search.mjs` smoke-tests it.
 
+**Should there be more sources?** Mostly no — see [`docs/source-coverage.md`](docs/source-coverage.md)
+for the probe-by-probe answer: ten endpoints tested, the ones that are bot-walled or paid and why,
+the one addition worth making (PubPeer), and the gap no database closes (in-copyright books).
+
 ## Ranking: deterministic, measured, and one signal rejected
 
 No model call. `rankScore()` scores each candidate from four signals and `rankResults()`
