@@ -1139,8 +1139,7 @@ async function openAlexOaUrls(doi, fetchImpl = fetch, cacheRoot = pdfCacheDir())
     }
   } catch { /* cache miss */ }
 
-  const url = `https://api.openalex.org/works/doi:${encodeURIComponent(doi)}`
-    + '?select=doi,title,open_access,best_oa_location,locations' + openAlexKeyParam();
+  const url = oaWorkUrl(doi, 'select=doi,title,open_access,best_oa_location,locations');
   let out;
   try {
     const res = await fetchImpl(url, { headers: { Accept: 'application/json' } });
@@ -1347,7 +1346,7 @@ export async function fetchCrossref(doi) {
 export async function fetchOpenAlex(doi) {
   const d = strip(doi);
   if (!d) return null;
-  return getJSON(`https://api.openalex.org/works/doi:${encodeURIComponent(d)}`);
+  return getJSON(oaWorkUrl(d));
 }
 
 // One DOI, both registries, one verdict. OpenAlex supplies the type and the is_retracted flag;
@@ -1439,6 +1438,14 @@ export function openAlexKey() {
 export function openAlexKeyParam() {
   const k = openAlexKey();
   return k ? '&api_key=' + encodeURIComponent(k) : '';
+}
+
+// One builder for the single-entity URL, so no call site can forget the key. checkDoi used to
+// build its own URL and silently stayed keyless even when a key was configured.
+export function oaWorkUrl(doi, extraQuery = '') {
+  const base = `https://api.openalex.org/works/doi:${encodeURIComponent(strip(doi))}`;
+  const q = [extraQuery, openAlexKeyParam().replace(/^&/, '')].filter(Boolean).join('&');
+  return q ? `${base}?${q}` : base;
 }
 
 // Every "budget exhausted" looks identical to "nothing found" from the caller's side, so name the

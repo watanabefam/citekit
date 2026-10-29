@@ -25,6 +25,10 @@ import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { loadLL } from './load-ll.mjs';
 import { screenDois } from './fidelity.mjs';
+// One key resolution for both tools: env var first, then ~/.config/citekit/openalex.key.
+// search.mjs previously read only the env var, so a key placed in the file (the documented way,
+// and the same convention as tavily.key) was silently ignored by every search.
+import { openAlexKey } from './fidelity.mjs';
 
 const KEYLESS = ['openalex', 'crossref', 'epmc', 'pubmed', 'eric', 'doaj'];
 const OPT_IN = ['s2', 'arxiv', 'core'];
@@ -32,7 +36,7 @@ const OPT_IN = ['s2', 'arxiv', 'core'];
 function parseArgs(argv) {
   const o = { queries: [], per: 8, sources: KEYLESS.slice(), oaOnly: false, yearFrom: '', json: false, md: false, out: '', enrich: true, help: false, listSources: false,
     fresh: false, maxAge: 6,
-    proxy: process.env.CITEKIT_PROXY || '', openalexKey: process.env.CITEKIT_OPENALEX_KEY || '',
+    proxy: process.env.CITEKIT_PROXY || '', openalexKey: openAlexKey(),
     s2Key: process.env.CITEKIT_S2_KEY || '', coreKey: process.env.CITEKIT_CORE_KEY || '',
     tavilyKey: process.env.CITEKIT_TAVILY_KEY || process.env.TAVILY_API_KEY || '',
     webDomains: [], webTimeRange: '' };

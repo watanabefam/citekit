@@ -15,7 +15,7 @@ import {
   similarity, reconcile, RECONCILE, encodeCompact, decodeRecord, ledgerToMarkdown,
   normaliseQuote, extractQuotes, verifyQuote, quoteReport, citationSymmetry,
   quotesOnline, stripHtml, citationLabelIn, citationLabelsIn, mapLookup, titleMatches,
-  readSourceIndex, findPassages, screenUrls, openAlexKey, openAlexError,
+  readSourceIndex, findPassages, screenUrls, openAlexKey, openAlexError, oaWorkUrl,
 } from '../tools/fidelity.mjs';
 
 let pass = 0, fail = 0;
@@ -738,34 +738,45 @@ section('17. OpenAlex budget, batching and caching');
   ok(screenUrls([]).length === 0, 'no DOIs means no request at all');
 
   // Key support: keyless is $0.10/day shared across the IP; a free key is $1/day and 30 rps.
-  const before = process.env.CITEKIT_OPENALEX_KEY;
-  process.env.CITEKIT_OPENALEX_KEY = 'k-test-123';
-  ok(/api_key=k-test-123/.test(screenUrl(['10.1000/x'])), 'the key is sent when one is configured');
-  ok(openAlexKey() === 'k-test-123', 'the key is read from the environment');
-  delete process.env.CITEKIT_OPENALEX_KEY;
-  ok(!/api_key=/.test(screenUrl(['10.1000/x'])), 'no key, no api_key parameter');
-  if (before !== undefined) process.env.CITEKIT_OPENALEX_KEY = before;
-
-  // The key may live in a file (~/.config/citekit/openalex.key), matching the tavily.key
-  // convention. This assertion exists because the first implementation used `require` in an ES
-  // module inside a try/catch, which failed silently and never read the file at all.
+  // HERMETIC: a real ~/.config/citekit/openalex.key on the developer's machine would otherwise make
+  // "no key" untrue and these assertions would test the environment rather than the code.
+  const keyEnvBefore = process.env.CITEKIT_OPENALEX_KEY;
   const homeBefore = process.env.HOME;
   const tmpHome = fs.mkdtempSync(`${os.tmpdir()}/ck-home-`);
-  fs.mkdirSync(`${tmpHome}/.config/citekit`, { recursive: true });
-  fs.writeFileSync(`${tmpHome}/.config/citekit/openalex.key`, 'file-key-456\n');
   process.env.HOME = tmpHome;
   delete process.env.CITEKIT_OPENALEX_KEY;
+
+  ok(openAlexKey() === '', 'no key anywhere resolves to empty');
+  ok(!/api_key=/.test(screenUrl(['10.1000/x'])), 'no key, no api_key parameter');
+  ok(!/api_key=/.test(oaWorkUrl('10.1000/x')), 'no key, no api_key on the single-entity URL');
+
+  // A key in a file, matching the tavily.key convention. This assertion exists because the first
+  // implementation used `require` in an ES module inside try/catch, which failed silently and never
+  // read the file at all.
+  fs.mkdirSync(`${tmpHome}/.config/citekit`, { recursive: true });
+  fs.writeFileSync(`${tmpHome}/.config/citekit/openalex.key`, 'file-key-456\n');
   ok(openAlexKey() === 'file-key-456', 'a key file is read when no env var is set', `got "${openAlexKey()}"`);
+  ok(/api_key=file-key-456/.test(oaWorkUrl('10.1000/x', 'select=doi')),
+    'the single-entity URL carries the key even with a select clause');
+
   process.env.CITEKIT_OPENALEX_KEY = 'env-wins';
   ok(openAlexKey() === 'env-wins', 'the env var takes precedence over the file');
-  delete process.env.CITEKIT_OPENALEX_KEY;
-  process.env.HOME = homeBefore;
-  fs.rmSync(tmpHome, { recursive: true, force: true });
-  if (before !== undefined) process.env.CITEKIT_OPENALEX_KEY = before;
+  ok(/api_key=env-wins/.test(screenUrl(['10.1000/x'])), 'the key is sent when one is configured');
 
+  delete process.env.CITEKIT_OPENALEX_KEY;
+  fs.rmSync(`${tmpHome}/.config/citekit`, { recursive: true, force: true });
   ok(/budget exhausted/.test(openAlexError(429, 'u').message)
     && /CITEKIT_OPENALEX_KEY/.test(openAlexError(429, 'u').message),
-    'a 429 names the cause and the fix instead of saying "HTTP 429"');
+    'a 429 with no key names the shared-budget cause and the fix');
+  process.env.CITEKIT_OPENALEX_KEY = 'k-test-123';
+  ok(/your key/i.test(openAlexError(429, 'u').message),
+    'a 429 WITH a key does not blame the shared budget');
+  delete process.env.CITEKIT_OPENALEX_KEY;
+
+  process.env.HOME = homeBefore;
+  if (keyEnvBefore !== undefined) process.env.CITEKIT_OPENALEX_KEY = keyEnvBefore;
+  fs.rmSync(tmpHome, { recursive: true, force: true });
+
   ok(!/budget/.test(openAlexError(500, 'u').message), 'a non-429 error is not misdescribed as budget');
 
   // The OA lookup cache: second call must not re-fetch.
