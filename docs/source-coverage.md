@@ -127,6 +127,63 @@ SciELO article carries no DOI, so there was nothing to look up. The claim that r
 additive is reasoned from OpenAlex's known English bias, **not measured**. Worth measuring before
 building the adapter.
 
+## Limits and failover — measured, not documented
+
+OpenAlex is the only **metered** source in the set. Everything else is free with no dollar budget.
+On *rate*, OpenAlex is also among the most generous — which inverts the usual assumption.
+
+| source | advertised limit | cost | measured burst |
+|---|---|---|---|
+| **openalex** (keyed) | 30 req/s, $1/day | metered | — |
+| **openalex** (keyless) | 10 req/s, $0.10/day **shared per IP** | metered | 100% 429 at $0 |
+| **crossref** | **3 req per 1 s** (`x-rate-limit-limit: 3`) | free | **9/12 → 429** |
+| **openaire** | `x-ratelimit-limit: 7199` | free | — |
+| **pubpeer** | `x-ratelimit-limit: 20` | free | — |
+| **epmc** | none advertised | free | **12/12, no throttle** |
+| **doaj** | none advertised | free | **12/12, no throttle** |
+| **eric** | none advertised | free | **12/12, no throttle** |
+| **datacite** | none advertised | free | **12/12, no throttle** |
+| **unpaywall** | none advertised (email required) | free | **12/12, no throttle** |
+| **semantic scholar** (keyless) | 1 req/s documented | free | 6/6 |
+| **arxiv** | 1 request / 3 s documented | free | — |
+
+Three conclusions that matter:
+
+1. **Do not use Crossref as an OpenAlex rate backup.** At 3 req/s it is *stricter* than OpenAlex
+   keyless (10/s), and a 12-request burst produced three 429s. It is a fine source; it is not a
+   throughput substitute.
+2. **The genuinely unmetered backends are EPMC, DOAJ, ERIC, DataCite and Unpaywall** — none
+   throttled across a 12-request burst and none carry a dollar budget.
+3. **The binding constraint is budget, not rate.** `x-ratelimit-limit: 1000` credits with `10`
+   credits per search means ~100 searches on the keyless $0.10, and ~1,000 on a $1 key. The
+   response also carries `x-ratelimit-reset` (seconds), which is what the low-budget warning could
+   quote instead of just a percentage.
+
+### Failover by layer
+
+CiteKit touches OpenAlex in two independent places, and they need different answers.
+
+**Search layer — already redundant.** `search.mjs` queries six sources in parallel and records
+per-source errors (`openalex: HTTP 429` appears in the query's `errors`). A run survives an OpenAlex
+outage, but the results are thinner: no `is_retracted`, no `type`, weaker enrichment.
+
+**Integrity layer — a real single point of failure.**
+
+| check | OpenAlex role | viable backup | verdict |
+|---|---|---|---|
+| retraction screen | `is_retracted` on a batched list call | Crossref `filter=update-type:retraction` (76,515 notices) and `filter=updates:<DOI>` | **partial** — returns 0 for `10.1378/chest.128.6.3817`. A Crossref-only fallback must announce itself as degraded, or it recreates the silent-clean-screen bug |
+| OA location for quote checks | `best_oa_location` + `locations` | **Unpaywall** — 12/12 unthrottled, adds `host_type` and `version` | **good**, with a caveat: it returned the same three 403-ing locations for the MDPI paper, so it fixes *provenance*, not *fetchability* |
+| critique signal | not an OpenAlex feature | PubPeer | orthogonal, not failover |
+
+**Untested:** whether the nominally-free single-entity lookup survives a `$0` budget. The pricing
+page calls single-entity retrieval Free/Unlimited, but during the exhaustion event requests 429'd
+across the board. Treat the whole API as unavailable at `$0` until that is measured.
+
+**Recommendation:** with a key at $1/day the budget constraint is 10× looser and effectively gone for
+normal use. If failover is built, build it for the **retraction screen** only — and have it say
+*"degraded: Crossref only, may miss retractions"* rather than silently substituting. Adding sources
+for rate reasons is not worth it; adding them for coverage reasons (see above) is.
+
 ## Recommended order
 
 | tier | source | why |
