@@ -17,6 +17,7 @@ import {
   quotesOnline, stripHtml, citationLabelIn, citationLabelsIn, mapLookup, titleMatches,
   readSourceIndex, findPassages, screenUrls, openAlexKey, openAlexError, oaWorkUrl,
   mapCritiqueResponse, critiqueDois, unpaywallDoi, dataciteDoi, crossrefRetractionFallback, redactUrl,
+  claimDifferences,
 } from '../tools/fidelity.mjs';
 
 let pass = 0, fail = 0;
@@ -936,6 +937,14 @@ section('19. credentials never reach an error message');
   const mailed = 'https://api.unpaywall.org/v2/10.1/x?email=tim@example.org';
   ok(!redactUrl(mailed).includes('tim@example.org'), 'redactUrl strips an email address too');
 
+  // Basic-auth credentials live in the authority, not the query, and were being printed verbatim.
+  ok(!redactUrl('https://user:hunter2@api.example.org/v2/x').includes('hunter2'),
+    'redactUrl strips credentials embedded in the URL authority');
+  ok(redactUrl('https://api.example.org/v2/x').includes('api.example.org'),
+    'and leaves an ordinary URL alone');
+  ok(!redactUrl('https://api.openalex.org/w?apiKey=SECRET5').includes('SECRET5'),
+    'the camelCase apiKey spelling is redacted as well as api_key');
+
   ok(redactUrl('https://api.crossref.org/works/10.1/x') === 'https://api.crossref.org/works/10.1/x',
     'a URL with no credentials is returned unchanged');
 
@@ -947,6 +956,136 @@ section('19. credentials never reach an error message');
   const e429 = openAlexError(429, keyed);
   ok(!e429.message.includes('sk-SECRET-123'), 'a 429 message redacts the key as well');
   ok(/budget|429/i.test(e429.message), 'and names the real cause, not a generic HTTP error');
+}
+
+section('20. adversarial: a claim that changes meaning must not look unchanged');
+
+{
+  const same = (a, b) => claimDifferences(a, b).length === 0;
+
+  // The measured attacks. Every one of these scored above RECONCILE.SAME (0.75) on surface
+  // similarity, so every one was filed as "matched" — meaning nothing had changed — before the
+  // meaning gate existed.
+  ok(!same('reward reduces intrinsic motivation (d = -0.40)', 'reward reduces intrinsic motivation (d = -0.04)'),
+    'an effect size off by a factor of ten is not the same claim',
+    claimDifferences('reward reduces intrinsic motivation (d = -0.40)',
+      'reward reduces intrinsic motivation (d = -0.04)').join('; '));
+  ok(!same('Pew 2009: 44% left the faith of their childhood', 'Pew 2009: 44% kept the faith of their childhood'),
+    'a reversed finding is not the same claim');
+  ok(!same('family prayer helps children flourish', 'family prayer harms children flourish'),
+    'helps -> harms is caught by the antonym gate');
+  ok(!same('Deci found no effect', 'Deci found a large effect'),
+    'a dropped negation is caught, though "no" is only two characters');
+
+  // The case no threshold could ever catch: removing "not" leaves the token SET identical, so
+  // similarity is exactly 1.000.
+  const negA = 'prayer is not associated with anxiety';
+  const negB = 'prayer is associated with anxiety';
+  ok(similarity(negA, negB) === 1, 'removing "not" leaves surface similarity at exactly 1.000',
+    String(similarity(negA, negB)));
+  ok(!same(negA, negB), 'and the meaning gate still catches it, which no threshold could');
+
+  // The other direction matters just as much: a real rewording must NOT be flagged, or the warning
+  // becomes noise and gets ignored.
+  ok(same('completion-contingent reward d = -0.36 in 20 studies',
+    'completion-contingent reward d = -0.36 in 20 studies'), 'an identical claim has no differences');
+  ok(same('Bengtson: 35 years, 350+ families', 'Bengtson: 35 years, 350+ families'),
+    'adding no number and flipping no word yields no differences');
+  ok(claimDifferences('Bengtson: 35 years, 350+ families',
+    'Bengtson: 35 years, 350+ families, 3,500+ individuals').length === 1,
+    'adding a figure is reported once, and as written ("3,500", not a European "3.500")',
+    claimDifferences('Bengtson: 35 years, 350+ families',
+      'Bengtson: 35 years, 350+ families, 3,500+ individuals').join('; '));
+
+  // End to end: the bucket matters, because `matched` is the one that carries the old verdict on.
+  // The draft sentence is deliberately a near-exact copy (similarity 0.804 > SAME 0.75), so ONLY the
+  // meaning gate can keep this out of `matched` — a looser paraphrase would pass on the threshold
+  // alone and prove nothing.
+  const alteredDraft = 'Reward reduces intrinsic motivation (d = -0.04).';
+  ok(similarity('reward reduces intrinsic motivation (d = -0.40)', alteredDraft) > RECONCILE.SAME,
+    'the altered claim scores above the SAME threshold, so similarity alone would accept it');
+  const rc = reconcile(
+    [{ key: 'k1', claim: 'reward reduces intrinsic motivation (d = -0.40)', access: 'full-text', verdict: 'supports' }],
+    alteredDraft);
+  ok(rc.matched.length === 0, 'an altered claim is NOT filed as matched');
+  ok(rc.drifted.length === 1 && rc.drifted[0].differences?.length,
+    'it is filed as drifted, with the reason attached');
+
+  const rcSame = reconcile(
+    [{ key: 'k2', claim: 'completion-contingent reward d = -0.36 in 20 studies', access: 'full-text', verdict: 'supports' }],
+    'Completion-contingent reward d = -0.36 in 20 studies.');
+  ok(rcSame.matched.length === 1, 'an unchanged claim still matches — the gate is not just noise');
+
+  // A ledger is an integrity record, so an illegal verdict is rejected rather than passed through.
+  ok((() => { try { decodeRecord({ claim: 'z', verdict: 'MAYBE' }); return false; } catch { return true; } })(),
+    'an unknown verdict is rejected instead of inherited by a report');
+  ok((() => { try { decodeRecord({ claim: 'z', verdict: 'SUPPORTS' }); return false; } catch { return true; } })(),
+    'a wrong-case verdict is rejected too, rather than silently not-matching downstream');
+  ok((() => { try { decodeRecord({ claim: 'z', access: 'skimmed' }); return false; } catch { return true; } })(),
+    'an unknown access level is rejected');
+  ok(decodeRecord({ claim: 'z', verdict: 'supports', access: 'full-text' }).verdict === 'supports',
+    'a legal record still decodes');
+}
+
+section('21. adversarial: quotation edge cases and a hostile cache');
+
+{
+  const corpus = 'Families that pray together report greater cohesion. '
+    + 'Adolescent anxiety has risen sharply since 2012. Dr. Smith agreed that families should pray together regularly at home.';
+
+  ok(verifyQuote('Families that pray together report greater cohesion.', corpus).status === 'verified',
+    'a verbatim quotation verifies (control)');
+
+  // Unicode: a PDF or web page encodes "café" as NFD, a draft as NFC. Failing to fold them accuses
+  // an author of a misquotation they did not commit — the one direction this tool must not fail in.
+  const nfd = 'Caf\u0065\u0301. Families that pray together report greater cohesion.';
+  ok(verifyQuote('Families that pray together report greater cohesion.', nfd).status === 'verified',
+    'NFD in the source and NFC in the draft still verify');
+  ok(normaliseQuote('caf\u00e9') === normaliseQuote('cafe\u0301'),
+    'the two encodings normalise to the same text');
+
+  // Splice: dropping a full stop and joining two sentences produced a VERIFIED verdict before this.
+  const splice = verifyQuote('report greater cohesion Adolescent anxiety has risen', corpus);
+  ok(splice.status === 'spliced', 'a quotation joining two sentences without an ellipsis is SPLICED, not verified',
+    splice.status);
+  ok(/ellipsis|full stop/.test(splice.why || ''), 'and the verdict says what to do about it');
+
+  ok(verifyQuote('Families that pray together ... anxiety has risen', corpus).status === 'verified',
+    'the same words WITH an ellipsis verify — a real ellipsis is not punished');
+  ok(verifyQuote('Dr. Smith agreed that families should pray together regularly', corpus).status === 'verified',
+    'an abbreviation is not mistaken for a sentence boundary');
+
+  // A cache file is an input like any other, and a corrupted one must not become a permanent answer.
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const crypto = await import('node:crypto');
+  const root = fs.mkdtempSync(`${os.tmpdir()}/ck-poison-`);
+  const doi = '10.1/poison-test';
+  const file = `${root}/unpaywall/${crypto.createHash('sha1').update(doi).digest('hex').slice(0, 16)}.json`;
+  fs.mkdirSync(`${root}/unpaywall`, { recursive: true });
+  process.env.CITEKIT_UNPAYWALL_EMAIL = 'test@example.org';
+  const fetchImpl = async () => new Response('{"is_oa":false,"oa_status":"closed"}',
+    { status: 200, headers: { 'content-type': 'application/json' } });
+
+  fs.writeFileSync(file, JSON.stringify({ at: Date.now() + 1e12, value: { reason: 'POISONED' } }));
+  const future = await unpaywallDoi(doi, { cacheRoot: root, fetchImpl });
+  ok(future.reason !== 'POISONED', 'an entry stamped in the future is not trusted', JSON.stringify(future).slice(0, 60));
+
+  fs.writeFileSync(file, JSON.stringify({ at: Date.now(), value: null }));
+  const nulled = await unpaywallDoi(doi, { cacheRoot: root, fetchImpl });
+  ok(nulled && nulled.isOa === false, 'a null cached value is a miss, not a silent empty answer');
+
+  fs.writeFileSync(file, '{"at":');
+  const broken = await unpaywallDoi(doi, { cacheRoot: root, fetchImpl });
+  ok(broken && broken.isOa === false, 'truncated JSON is a miss, not a crash');
+
+  fs.writeFileSync(file, JSON.stringify({ at: Date.now(), value: { reason: 'not in Unpaywall' } }));
+  const good = await unpaywallDoi(doi, { cacheRoot: root, fetchImpl });
+  ok(good.cached === true && good.reason === 'not in Unpaywall', 'a well-formed cache entry is still used');
+
+  ok({}.polluted === undefined, 'no prototype pollution');
+  delete process.env.CITEKIT_UNPAYWALL_EMAIL;
+  fs.rmSync(root, { recursive: true, force: true });
 }
 
 section('8. citation contexts (pure)');

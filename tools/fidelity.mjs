@@ -594,10 +594,26 @@ export function encodeCompact(e) {
   return o;
 }
 
+// An unknown verdict is not a verdict. Passing "MAYBE" through — or coercing it to something
+// plausible — lets the ledger report a judgement nobody recorded, which is the failure this whole
+// structure exists to prevent. Same for access: an unrecognised value defaults the claim to a
+// confidence it was never given.
+export function assertLedgerEnums(rec) {
+  const vs = VERDICTS;
+  if (!vs.includes(rec.verdict)) {
+    throw new Error(`unknown verdict ${JSON.stringify(rec.verdict)} — must be one of ${vs.join('|')}`);
+  }
+  const legal = Object.values(ACCESS_FROM);
+  if (!legal.includes(rec.access)) {
+    throw new Error(`unknown access ${JSON.stringify(rec.access)} — must be one of ${legal.join('|')}`);
+  }
+  return rec;
+}
+
 export function decodeRecord(o) {
   // compact
   if (o.k !== undefined && o.claim === undefined) {
-    return {
+    return assertLedgerEnums({
       key: o.k, claim: o.c || '',
       asserted_by: o.by || LEDGER_DEFAULT_AGENT, asserted_at: o.at || LEDGER_DEFAULT_AT,
       source: { doi: o.d || null, author_year: o.s || null, title: null },
@@ -605,17 +621,17 @@ export function decodeRecord(o) {
       via: o.v || null, evidence_line: o.e || null,
       verdict: VERDICT_FROM[o.x ?? ''] || 'unclear',
       load_bearing: !!o.l,
-    };
+    });
   }
   // legacy verbose
-  return {
+  return assertLedgerEnums({
     key: o.key, claim: o.claim || '',
     asserted_by: o.asserted_by || LEDGER_DEFAULT_AGENT, asserted_at: o.asserted_at || LEDGER_DEFAULT_AT,
     source: o.source || { doi: null, author_year: null, title: null },
     access: o.access || 'not-read', via: o.via || null,
     evidence_line: o.evidence_line || null,
     verdict: o.verdict || 'unclear', load_bearing: !!o.load_bearing,
-  };
+  });
 }
 
 export const LEDGER_DEFAULT_AGENT = 'draft';
@@ -667,6 +683,51 @@ export function similarity(a, b) {
 
 export const RECONCILE = { SAME: 0.75, DRIFTED: 0.45 };
 
+// Surface similarity cannot distinguish "unchanged" from "inverted". Measured, both of these score
+// above SAME (0.75) and were therefore filed as `matched` — the bucket that means nothing to see:
+//   "(d = -0.40)" -> "(d = -0.04)"      0.804   an effect size off by a factor of ten
+//   "44% left the faith" -> "44% kept"  0.774   the finding reversed
+// A one-character edit that changes what a claim asserts must never inherit the old verdict, so
+// `matched` additionally requires the load-bearing tokens to be identical: the numbers, the
+// negation, and the direction words.
+const NUMERIC = /-?\d+(?:[.,]\d+)*/g;
+const NEGATORS = new Set(['not', 'no', 'never', 'none', 'without', 'cannot', 'nothing', 'neither', 'nor']);
+const ANTONYMS = [
+  ['helps', 'harms'], ['help', 'harm'], ['more', 'less'], ['more', 'fewer'], ['increase', 'decrease'],
+  ['increases', 'decreases'], ['increased', 'decreased'], ['rise', 'fall'], ['rises', 'falls'],
+  ['rose', 'fell'], ['higher', 'lower'], ['left', 'kept'], ['left', 'stayed'], ['supports', 'refutes'],
+  ['support', 'refute'], ['better', 'worse'], ['positive', 'negative'], ['beneficial', 'detrimental'],
+  ['always', 'never'], ['all', 'none'], ['stronger', 'weaker'], ['significant', 'insignificant'],
+  ['increase', 'reduce'], ['increases', 'reduces'], ['increased', 'reduced'],
+];
+
+// Word-boundary test on the raw text, NOT on claimTokens(): that tokeniser drops short words, so
+// "no" — the most common negation in English — was invisible to the first version of this check.
+const hasWord = (s, w) => new RegExp(`(^|[^\\p{L}])${w}([^\\p{L}]|$)`, 'iu').test(s);
+
+export function claimDifferences(a, b) {
+  const A = String(a || ''), B = String(b || '');
+  const diffs = [];
+  // Compare numeric literals as written. Normalising "3,500" to "3.500" made an English thousands
+  // separator look like a European decimal point, and printing that invented value in the warning
+  // is worse than saying nothing.
+  const nums = s => (s.match(NUMERIC) || []).sort();
+  const na = nums(A), nb = nums(B);
+  if (na.join('|') !== nb.join('|')) {
+    diffs.push(`number changed: [${na.join(', ') || '\u2014'}] \u2192 [${nb.join(', ') || '\u2014'}]`);
+  }
+  const neg = s => [...NEGATORS].filter(w => hasWord(s, w)).sort().join(', ');
+  if (neg(A) !== neg(B)) diffs.push(`negation changed: [${neg(A) || '\u2014'}] \u2192 [${neg(B) || '\u2014'}]`);
+  for (const [x, y] of ANTONYMS) {
+    const aHasX = hasWord(A, x) && !hasWord(A, y), aHasY = hasWord(A, y) && !hasWord(A, x);
+    const bHasX = hasWord(B, x) && !hasWord(B, y), bHasY = hasWord(B, y) && !hasWord(B, x);
+    if ((aHasX && bHasY) || (aHasY && bHasX)) {
+      diffs.push(`polarity flipped: ${aHasX ? x : y} \u2192 ${bHasX ? x : y}`);
+    }
+  }
+  return [...new Set(diffs)];
+}
+
 export function reconcile(entries, draft) {
   // candidate claims from the draft: sentences and list items long enough to be a claim
   const candidates = [];
@@ -686,9 +747,14 @@ export function reconcile(entries, draft) {
       const s = similarity(e.claim, c);
       if (s > bestScore) { bestScore = s; best = c; }
     }
-    if (bestScore >= RECONCILE.SAME) { matched.push({ entry: e, draft: best, score: +bestScore.toFixed(2) }); seen.add(best); }
-    else if (bestScore >= RECONCILE.DRIFTED) { drifted.push({ entry: e, draft: best, score: +bestScore.toFixed(2) }); seen.add(best); }
-    else stale.push({ entry: e, nearest: best, score: +bestScore.toFixed(2) });
+    // High surface similarity is necessary but not sufficient: a changed number or a flipped
+    // direction is a DIFFERENT claim, however few characters it costs.
+    const diffs = best ? claimDifferences(e.claim, best) : [];
+    const score = +bestScore.toFixed(2);
+    if (bestScore >= RECONCILE.SAME && !diffs.length) { matched.push({ entry: e, draft: best, score }); seen.add(best); }
+    else if (bestScore >= RECONCILE.DRIFTED) {
+      drifted.push({ entry: e, draft: best, score, differences: diffs }); seen.add(best);
+    } else stale.push({ entry: e, nearest: best, score });
   }
   const unmatchedDraft = candidates.filter(c => !seen.has(c));
   return { matched, drifted, stale, unmatchedDraft, candidates: candidates.length };
@@ -715,16 +781,32 @@ const LIGATURES = { '\uFB00': 'ff', '\uFB01': 'fi', '\uFB02': 'fl', '\uFB03': 'f
 
 export function normaliseQuote(s) {
   return String(s || '')
+    // Unicode first. A PDF or web page may encode "café" as NFD (e + combining accent) while a draft
+    // contains NFC, and the two are different bytes for the same word. Measured: an NFD corpus made
+    // a perfectly good quotation report "not found" — a false accusation against an innocent author,
+    // which is the direction this tool must never fail in.
+    .normalize('NFC')
     .replace(/[\uFB00-\uFB06]/g, c => LIGATURES[c] || c)
     .replace(/(\p{L})-\s*\n\s*(\p{L})/gu, '$1$2')      // hyphenated line break
     .replace(/(\d),(?=\d{3}(?!\d))/g, '$1')             // thousands separators
     .replace(/(\d)\.(?=\d)/g, '$1\u0001')               // protect decimal points
     .toLowerCase()
-    .replace(/[^\p{L}\p{N}\u0001]+/gu, ' ')
+    .replace(/[^\p{L}\p{N}\u0001\u0002]+/gu, ' ')
     .replace(/\u0001/g, '.')
     .replace(/\s+/g, ' ')
     .trim();
 }
+
+// Sentence boundaries, as a token that survives normalisation. Stripping punctuation let a
+// quotation that joins the end of one sentence to the start of the next match a source in which
+// those words never appear together: "…report greater cohesion Adolescent anxiety…" came back
+// VERIFIED. Dropping a full stop and joining two sentences is a misquotation, so it gets its own
+// verdict rather than being called verified or accused of being absent.
+const BOUNDARY = '\u0002';
+const QUOTE_ABBREV = /^(?:dr|mr|mrs|ms|st|jr|sr|prof|rev|cf|vs|al|etc|no|vol|pp|p|fig|ch|sec|e|i)$/i;
+const withBoundaries = s => normaliseQuote(String(s).replace(
+  /(\p{L}+)([.!?])["\u201d\u2019)\]]?\s+(?=[A-Z0-9"\u201c])/gu,
+  (m, word, dot) => (word.length === 1 || QUOTE_ABBREV.test(word)) ? m : `${word}${dot} ${BOUNDARY} `));
 
 const wordCount = s => String(s || '').trim().split(/\s+/).filter(Boolean).length;
 
@@ -785,11 +867,20 @@ export function verifyQuote(quote, corpusText) {
   const parts = String(quote).split(/\u2026|\.\.\./).map(normaliseQuote).filter(p => p.length > 8);
   if (!parts.length) return { status: 'too-short', why: 'no usable fragment' };
   const hay = normaliseQuote(corpusText);
+  const hayB = withBoundaries(corpusText);
   let pos = 0;
+  let spliced = null;
   for (const p of parts) {
     const i = hay.indexOf(p, pos);
     if (i < 0) return { status: 'not-found', part: parts.length > 1 ? p.slice(0, 90) : undefined };
+    // Present in the flattened text but absent once sentence boundaries are marked: the words exist,
+    // but only by joining two sentences with the full stop removed.
+    if (!spliced && !hayB.includes(p)) spliced = p.slice(0, 90);
     pos = i + p.length;
+  }
+  if (spliced) {
+    return { status: 'spliced', part: spliced,
+      why: 'matches only across a sentence boundary — the full stop is missing or an ellipsis is needed' };
   }
   return { status: 'verified', parts: parts.length };
 }
@@ -822,6 +913,7 @@ export function quoteReport(markdown, corpusText) {
     total: results.length,
     verified: results.filter(r => r.status === 'verified').length,
     notFound: results.filter(r => r.status === 'not-found'),
+    spliced: results.filter(r => r.status === 'spliced'),
     unattributed: results.filter(r => r.status === 'unattributed').length,
     tooShort: results.filter(r => r.status === 'too-short').length,
     results,
@@ -1377,7 +1469,12 @@ async function cachedJson(cacheRoot, ns, key, ttlMs, produce) {
   const file = `${dir}/${crypto.createHash('sha1').update(String(key)).digest('hex').slice(0, 16)}.json`;
   try {
     const hit = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (hit && Date.now() - hit.at < ttlMs) return { ...hit.value, cached: true };
+    // A null value is not a cached answer, and a timestamp in the future would pin an entry for ever
+    // — a corrupted or hostile cache file could otherwise outlive every TTL.
+    if (hit && hit.value && Number.isFinite(hit.at)
+      && hit.at <= Date.now() + 60e3 && Date.now() - hit.at < ttlMs) {
+      return { ...hit.value, cached: true };
+    }
   } catch { /* miss */ }
   const value = await produce();
   if (value && !value.reason) {
@@ -1638,7 +1735,10 @@ export function oaWorkUrl(doi, extraQuery = '') {
 export function redactUrl(u) {
   return String(u)
     .replace(/([?&]api_key=)[^&]*/gi, '$1REDACTED')
-    .replace(/([?&]email=)[^&]*/gi, '$1REDACTED');
+    .replace(/([?&]apiKey=)[^&]*/gi, '$1REDACTED')
+    .replace(/([?&]email=)[^&]*/gi, '$1REDACTED')
+    // Basic-auth credentials live in the authority, not the query: https://user:pass@host/…
+    .replace(/(\/\/)[^/@\s]+@/g, '$1REDACTED@');
 }
 
 export function openAlexError(status, url) {
@@ -1801,7 +1901,7 @@ async function main() {
         const s = similarity(old.claim, rec.claim);
         if (s > nearScore) { nearScore = s; near = old; }
       }
-      if (near && nearScore >= RECONCILE.SAME) {
+      if (near && nearScore >= RECONCILE.SAME && !claimDifferences(near.claim, rec.claim).length) {
         if (!has('replace')) {
           console.error(`near-duplicate of ${near.key} (similarity ${nearScore.toFixed(2)}) — `
             + `pass --replace to update that entry instead of appending a second one.`);
@@ -1850,6 +1950,7 @@ async function main() {
           console.log(`    DRIFTED (${d.score}) ${d.entry.key}`);
           console.log(`      ledger: ${d.entry.claim.replace(/\s+/g, ' ').slice(0, 110)}`);
           console.log(`      draft : ${d.draft.replace(/\s+/g, ' ').slice(0, 110)}`);
+          for (const why of d.differences || []) console.log(`      \u26a0 ${why}`);
         }
         for (const s of rc.stale) {
           console.log(`    STALE   ${s.entry.key} \u2014 claim no longer in the draft (nearest ${s.score}):`);
@@ -1907,7 +2008,7 @@ async function main() {
       : quoteReport(md, corpus);
 
     console.log(`${r.total} inline quote(s) \u00b7 ${r.verified} verified \u00b7 ${r.notFound.length} not found `
-      + `\u00b7 ${r.unverifiable ? r.unverifiable.length + ' unverifiable ' : ''}\u00b7 ${r.unattributed} unattributed `
+      + `\u00b7 ${r.spliced ? r.spliced.length + ' SPLICED ' : ''}\u00b7 ${r.unverifiable ? r.unverifiable.length + ' unverifiable ' : ''}\u00b7 ${r.unattributed} unattributed `
       + `\u00b7 ${r.tooShort} too short`);
     console.log(`sources: ${nFiles} corpus file(s)${online ? ' + online resolution' : ''}${map ? ` + map ${mapPath.replace(process.env.HOME || '~', '~')}` : ''}`);
     console.log('(a quote is only checked when a citation sits in the same sentence; unattributed quotes are '

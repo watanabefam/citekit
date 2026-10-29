@@ -350,7 +350,7 @@ node tools/fidelity.mjs quotes FILE.md --online            # verify quotations a
 node tools/fidelity.mjs refs FILE.md                       # orphan citations, uncited references
 node tools/fidelity.mjs sources                            # cached sources + their token cost
 node tools/fidelity.mjs passage URL --grep "phrase"        # one passage, not the whole paper
-node tests/fidelity.mjs [--live]                           # 209 assertions, 3 live probes
+node tests/fidelity.mjs [--live]                           # 241 assertions, 3 live probes
 ```
 
 **Four checks over already-fetched payloads, plus two that read the draft's sources.** The suite
@@ -456,6 +456,23 @@ Similarity is `0.5 × Jaccard + 0.5 × containment × lengthRatio`. The length r
 plain containment scored **1.0** between a six-word claim and a long unrelated sentence that
 happened to contain all six words, which produced confident false matches. `claim add` runs the same
 test and refuses to append a near-duplicate unless you pass `--replace`.
+
+**Similarity is necessary but not sufficient.** Surface overlap cannot tell "unchanged" from
+"inverted", and the numbers were worse than that sounds:
+
+| edit | similarity | old bucket | now |
+|---|---|---|---|
+| `(d = -0.40)` → `(d = -0.04)` | 0.804 | matched | **drifted**, `number changed` |
+| `44% left the faith` → `44% kept` | 0.774 | matched | **drifted**, `polarity flipped` |
+| `prayer is not associated` → `prayer is associated` | **1.000** | matched | **drifted**, `negation changed` |
+
+The last row is why a threshold can never fix this: removing "not" leaves the token *set* identical,
+so no cut-off distinguishes the two claims. `matched` — the bucket that carries the old verdict
+forward — now additionally requires the load-bearing parts to be identical: the numeric literals, the
+negation, and the direction words. A real rewording still matches; a changed number, a dropped
+negation, or a flipped antonym (`helps`/`harms`, `more`/`less`, `left`/`kept`) does not.
+`claim add` applies the same gate, so an inverted claim is not offered up as a "near-duplicate" for
+`--replace` to overwrite.
 
 `--strict-stale` fails the build on stale entries; without it they are reported only.
 
@@ -650,6 +667,30 @@ host. Trusting it fetched a tumour-biology paper. All OA locations are now colle
 order — including repository mirrors, which are often reachable when the publisher is not.
 
 **Every candidate must pass a title gate** before any verdict is drawn from it. Without that, a
+### Adversarial findings worth keeping in the README
+
+Four ways the checks could have lied, each found by trying to make them lie rather than by reading
+the code. All four are now covered by tests that fail without the fix.
+
+**A quotation that silently joins two sentences used to be `verified`.** Punctuation is stripped
+before matching, so "…report greater cohesion. Adolescent anxiety…" and the quote
+"…report greater cohesion Adolescent anxiety…" compared equal — the words never appear together in
+the source, but the full stop was doing the separating and the full stop was gone. There is now a
+third verdict: **`SPLICED`** — present only if two sentences are joined. Sentence boundaries are
+marked with a token that survives normalisation, abbreviations (`Dr.`, `e.g.`, initials) are exempt,
+and a genuine ellipsis still verifies.
+
+**Unicode normalisation was an accusation machine.** A source encoding "café" as NFD (e + combining
+accent) and a draft encoding it as NFC are different bytes for the same word. The verifier reported
+`not found` — telling an author they had misquoted a source they had quoted exactly. Both sides are
+now folded to NFC first. This is the one direction the tool must never fail in, and it was failing
+there.
+
+**A claim that changed meaning used to look unchanged.** See the reconciliation note below.
+
+**A corrupted cache file could pin an answer for ever.** An entry with a timestamp in the future
+satisfied every TTL test, and a `null` value was returned as a hit. Both are now rejected as misses.
+
 wrong-but-fetchable URL produces a confident "quote not found" against an innocent author. The gate
 is what makes the difference between rejecting a *copy* and rejecting a *quote*: on the arXiv DOI,
 candidate 1 fetched 97KB of the wrong document and was discarded, and candidate 5 verified.
@@ -666,7 +707,7 @@ one-word mutation of the same sentence did not.
 Worked example on the real draft (`family/habits/prayer.md`, 1,100 lines):
 
 ```
-102 inline quote(s) · 7 verified · 0 not found · 16 unverifiable · 44 unattributed · 35 too short
+107 inline quote(s) · 7 verified · 0 not found · 0 SPLICED · 16 unverifiable · 43 unattributed · 35 too short
   VERIFIED   [map · CCC 2688] The memorization of basic prayers offers an essential support to the life of prayer…
   VERIFIED   [map · CCC 2729] The habitual difficulty in prayer is **distraction**.
   VERIFIED   [map · Pew 2009] just gradually drifted away
