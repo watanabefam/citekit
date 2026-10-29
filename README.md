@@ -229,7 +229,7 @@ and `web` (Tavily, keyless by default) are opt-in. `node tests/tools-search.mjs`
 
 **Should there be more sources?** Mostly no — see [`docs/source-coverage.md`](docs/source-coverage.md)
 for the probe-by-probe answer: ten endpoints tested, the ones that are bot-walled or paid and why,
-the one addition worth making (PubPeer), and the gap no database closes (in-copyright books).
+the additions worth making across disciplines, the ones that refuse access, and how the ranking eval constrains what can be added.
 
 ## Ranking: deterministic, measured, and one signal rejected
 
