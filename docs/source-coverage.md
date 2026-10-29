@@ -194,7 +194,8 @@ Status after this round — the first two tiers are **built and tested**:
 | 1 | **DataCite** | **done** — `dataciteDoi()`, consulted when OpenAlex 404s a DOI so a dataset is reported as a dataset |
 | 2 | **Unpaywall** | **done as a backstop** — `unpaywallDoi()`, used only when OpenAlex has no copy and only when `CITEKIT_UNPAYWALL_EMAIL` is set; adds `version` provenance |
 | 2 | **Crossref degraded screen** | **done** — self-declaring, paced at the measured 3 req/s, capped, reports `checked/requested` |
-| 2 | **SciELO** (CLI), **CiNii**, **OpenAIRE** | not built — measure the OpenAlex overlap first (below) |
+| 2 | **SciELO** (CLI), **CiNii** | **measured — do not build.** Recent SciELO articles were 8/8 already in OpenAlex; CiNii records rarely expose a DOI at all, so they cannot be deduplicated. See "Still open" |
+| 2 | **OpenAIRE** | not built — overlaps OpenAlex most of all |
 | 2 | **bioRxiv / medRxiv** | not built |
 | 3 | **NASA ADS**, **CourtListener** | not built — free tokens, follow the `s2`/`core` opt-in pattern |
 | — | **zbMATH**, **Figshare**, **Open Library** | not built, low urgency |
@@ -202,9 +203,22 @@ Status after this round — the first two tiers are **built and tested**:
 
 ## Still open
 
-- **The overlap measurement.** Whether SciELO/CiNii records are already in OpenAlex is unmeasured —
-  the sampled 1998 SciELO article carries no DOI, so there was nothing to look up. Measure before
-  building either adapter.
+- **The overlap measurement — now done, and it says do not build.** Two samples, both taken from
+  *recent* records (the first attempt failed by sampling the oldest pages, which predate DOIs):
+  - **SciELO: 8 of 8.** Recent articles from `articlemeta` were resolved to DOIs and looked up in
+    OpenAlex: **every one was already there**, including Portuguese-language ones. One apparent miss
+    (`10.1590/1806-9304202400000080err-en`) turned out to be **unregistered at Crossref too** — bad
+    metadata in the SciELO record, not missing coverage. The "regional indexes are additive because
+    OpenAlex is English-biased" hypothesis is **falsified for DOI-bearing records**. A SciELO adapter
+    would add duplicates.
+  - **CiNii: not deduplicable.** Only **1 of 6** sampled records exposed a DOI even in its full
+    `.json`; the rest are NCID-/crid-addressed, and the first sample was a 1911 book. Matching would
+    have to be title-based, which is lossy exactly where it matters (Japanese titles, romanisation).
+    A CiNii adapter would need a fuzzy matcher before it could be trusted, and most of what it adds
+    is pre-DOI print.
+  - **What this means:** the two tier-2 regional adapters should stay unbuilt. Breadth is not
+    where the remaining risk is; the risk is in what a *result* means, which is what the ledger,
+    quote checks and critique screen address.
 - **Whether a `$0` budget kills the nominally-free single-entity lookup.** Recorded as untested.
 - **A critique check has no notion of a stale comment count** — deliberately never cached, so a
   repeat run re-asks PubPeer. That is one extra call per run; acceptable, but it is a cost.
