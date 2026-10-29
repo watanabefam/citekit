@@ -16,6 +16,7 @@ import {
   normaliseQuote, extractQuotes, verifyQuote, quoteReport, citationSymmetry,
   quotesOnline, stripHtml, citationLabelIn, citationLabelsIn, mapLookup, titleMatches,
   readSourceIndex, findPassages, screenUrls, openAlexKey, openAlexError, oaWorkUrl,
+  mapCritiqueResponse, critiqueDois, unpaywallDoi, dataciteDoi, crossrefRetractionFallback,
 } from '../tools/fidelity.mjs';
 
 let pass = 0, fail = 0;
@@ -798,6 +799,96 @@ section('17. OpenAlex budget, batching and caching');
   await quotesOnline(doc, { fetchImpl: counting, cacheDir: cdir });
   ok(afterFirst === 1, 'the OA lookup is made once', `calls=${afterFirst}`);
   ok(calls === afterFirst, 'a second run is served from the OA cache', `calls=${calls}`);
+  fs.rmSync(cdir, { recursive: true, force: true });
+}
+
+section('18. critique, datasets, and the open-access backup');
+
+{
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const cdir = fs.mkdtempSync(`${os.tmpdir()}/ck-x-`);
+  const jsonRes = obj => new Response(JSON.stringify(obj), { status: 200, headers: { 'content-type': 'application/json' } });
+
+  // --- PubPeer mapper (pure) ---
+  const m = mapCritiqueResponse({
+    feedbacks: [
+      { id: '10.1/a', total_comments: 3, total_peeriodical_comments: 2, url: 'u1', users: 'A, B', last_commented_at: '2026-01-01' },
+      { id: 'https://doi.org/10.1/b', total_comments: 1 },
+      { id: '', total_comments: 9 },
+    ],
+  });
+  ok(m.size === 2, 'feedback entries key on DOI and empty ids are dropped', `size=${m.size}`);
+  ok(m.get('10.1/a').comments === 5, 'peeriodical comments are added to the comment total');
+  ok(m.get('10.1/b') !== undefined, 'a DOI URL is normalised to a bare DOI');
+  ok(mapCritiqueResponse({}).size === 0, 'an empty response yields no hits');
+
+  // --- PubPeer batching and failure handling ---
+  let batchSizes = [];
+  const ppMock = async (url, opts) => {
+    batchSizes.push(JSON.parse(opts.body).dois.length);
+    return jsonRes({ feedbacks: [{ id: '10.1/x', total_comments: 2 }] });
+  };
+  const many = await critiqueDois(Array.from({ length: 120 }, (_, i) => `10.1/d${i}`), { fetchImpl: ppMock });
+  ok(batchSizes.length === 3 && batchSizes.every(n => n <= 50),
+    'a 120-DOI critique check is chunked at 50 per call', JSON.stringify(batchSizes));
+  ok(many.hits.get('10.1/x')?.comments === 2, 'chunked results merge into one map');
+  ok(many.errors.length === 0, 'no errors on a clean run');
+
+  const ppBad = await critiqueDois(['10.1/z'], { fetchImpl: async () => new Response('nope', { status: 503 }) });
+  ok(ppBad.hits.size === 0 && ppBad.errors.length === 1,
+    'a PubPeer failure is reported, not thrown — critique must not break a search');
+
+  // --- Unpaywall ---
+  delete process.env.CITEKIT_UNPAYWALL_EMAIL;
+  const noEmail = await unpaywallDoi('10.1/x', { cacheRoot: cdir });
+  ok(/email/i.test(noEmail.reason) && /CITEKIT_UNPAYWALL_EMAIL/.test(noEmail.reason),
+    'without an email Unpaywall explains how to enable it rather than failing silently');
+
+  process.env.CITEKIT_UNPAYWALL_EMAIL = 'test@example.org';
+  const upMock = async () => jsonRes({
+    is_oa: true, oa_status: 'green',
+    oa_locations: [{ url_for_pdf: 'https://repo.example/x.pdf', host_type: 'repository', version: 'submittedVersion' }],
+  });
+  const up = await unpaywallDoi('10.1/y', { fetchImpl: upMock, cacheRoot: cdir });
+  ok(up.urls.length === 1 && up.urls[0] === 'https://repo.example/x.pdf', 'Unpaywall locations become candidate URLs');
+  ok(up.locations[0].version === 'submittedVersion',
+    'VERSION PROVENANCE: Unpaywall reports whether a copy is the submitted or published version');
+
+  const up404 = await unpaywallDoi('10.1/none', {
+    fetchImpl: async () => new Response('<html>404 Not Found</html>', { status: 404 }), cacheRoot: cdir,
+  });
+  ok(/not in Unpaywall/.test(up404.reason), 'a 404 (which returns HTML, not JSON) is handled without throwing');
+  delete process.env.CITEKIT_UNPAYWALL_EMAIL;
+
+  // --- DataCite ---
+  const dc = await dataciteDoi('10.5281/zenodo.1', {
+    fetchImpl: async () => jsonRes({ data: { attributes: {
+      doi: '10.5281/zenodo.1', publicationYear: 2026, titles: [{ title: 'A dataset' }],
+      types: { resourceTypeGeneral: 'Dataset' }, publisher: 'Zenodo',
+    } } }),
+    cacheRoot: cdir,
+  });
+  ok(dc.found && dc.kind === 'Dataset' && dc.year === 2026,
+    'DataCite identifies a cited object as a dataset rather than "not found"');
+
+  // --- Crossref degraded fallback ---
+  const crMock = async (url) => {
+    if (url.includes('10.1%2Fretracted') || url.includes('10.1/retracted')) {
+      return jsonRes({ message: { items: [{ DOI: '10.1/notice', type: 'retraction', 'update-to': [{ DOI: '10.1/retracted', type: 'retraction' }] }] } });
+    }
+    return jsonRes({ message: { items: [] } });
+  };
+  const fb = await crossrefRetractionFallback(['10.1/retracted', '10.1/clean'], { fetchImpl: crMock, intervalMs: 0 });
+  ok(fb.hits.get('10.1/retracted')?.retracted === true, 'the Crossref fallback finds a retraction notice');
+  ok(!fb.hits.has('10.1/clean'), 'and does not invent one for a clean DOI');
+  ok(fb.checked === 2 && fb.requested === 2, 'coverage is reported as checked/requested');
+
+  const capped = await crossrefRetractionFallback(
+    ['10.1/a', '10.1/b', '10.1/c', '10.1/d', '10.1/e'], { fetchImpl: crMock, max: 2, intervalMs: 0 });
+  ok(capped.checked === 2 && capped.requested === 5,
+    'the fallback caps how many DOIs it will attempt, and says so in the counts');
+
   fs.rmSync(cdir, { recursive: true, force: true });
 }
 

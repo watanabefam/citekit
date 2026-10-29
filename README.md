@@ -20,7 +20,7 @@ Tick **dry run** first if you want to see the exact prompt before spending token
 `node tests/verify.mjs` runs 95 behavioural assertions against live APIs and fake SSE providers.
 `tests/browser.mjs` (44 assertions) drives real Chromium; `tests/proxy-integration.mjs` (16) verifies
 the optional Cloudflare Worker against the real workerd runtime; `tests/mcp-server.mjs` (19) speaks
-the MCP protocol over stdio to the real server. `tests/tools-search.mjs` (11) covers the CLI, and
+the MCP protocol over stdio to the real server. `tests/tools-search.mjs` (24) covers the CLI, and
 `tests/fidelity.mjs` (55, plus 3 live probes) covers the citation-integrity checks.
 
 ---
@@ -227,6 +227,19 @@ Flags: `--per N` · `--sources csv` · `--oa-only` · `--year-from YYYY` · `--j
 Default sources are the keyless/CORS-open set; `s2`, `arxiv` (need the proxy), `core` (needs a key)
 and `web` (Tavily, keyless by default) are opt-in. `node tests/tools-search.mjs` smoke-tests it.
 
+### Before committing
+
+`./scripts/install-hooks.sh` installs a pre-commit hook that runs the **offline** suites (fidelity
+and citation-walk, together under a second) and warns on orphan citations in any staged markdown —
+cited in prose, absent from Sources. Nothing network-dependent belongs in a commit hook, so the live
+probes stay in `--live`. Set `CITEKIT_HOOK_STRICT=1` to make orphan citations block rather than warn.
+The hook was verified by breaking an assertion and confirming it exits non-zero, because an alarm
+that cannot fire is decoration.
+
+Two optional environment variables: `CITEKIT_UNPAYWALL_EMAIL` enables the Unpaywall open-access
+backstop, and `CITEKIT_OPENALEX_KEY` (or `~/.config/citekit/openalex.key`) raises the OpenAlex daily
+budget tenfold.
+
 **Should there be more sources?** Mostly no — see [`docs/source-coverage.md`](docs/source-coverage.md)
 for the probe-by-probe answer: ten endpoints tested, the ones that are bot-walled or paid and why,
 the additions worth making across disciplines, the ones that refuse access, and how the ranking eval constrains what can be added.
@@ -337,7 +350,7 @@ node tools/fidelity.mjs quotes FILE.md --online            # verify quotations a
 node tools/fidelity.mjs refs FILE.md                       # orphan citations, uncited references
 node tools/fidelity.mjs sources                            # cached sources + their token cost
 node tools/fidelity.mjs passage URL --grep "phrase"        # one passage, not the whole paper
-node tests/fidelity.mjs [--live]                           # 176 assertions, 3 live probes
+node tests/fidelity.mjs [--live]                           # 196 assertions, 3 live probes
 ```
 
 **Four checks over already-fetched payloads, plus two that read the draft's sources.** The suite
@@ -556,6 +569,8 @@ labelled instead:
 node tools/search.mjs "structured literacy" --sources openalex      # reuse up to 6h
 node tools/search.mjs "structured literacy" --max-age 1             # fresher
 node tools/search.mjs "structured literacy" --fresh                 # bypass entirely
+node tools/search.mjs "structured literacy" --since                 # what is new since last run
+node tools/search.mjs "structured literacy" --no-critique           # skip the PubPeer check
 ```
 
 The age appears in the output, always — `_12 unique · cached 3h ago_` — so a stale set can never be
@@ -566,6 +581,48 @@ cannot. That is the one stale value that could actually hurt someone, so it is n
 ```
 _cache: 1 hit · 0 miss · max age 6h — discovery is cached, retraction status is always re-checked
 ```
+
+### Critique, and what happens when OpenAlex is down
+
+Two checks now run on every search, and both can say "I could not do this properly".
+
+**PubPeer critique.** A paper can be heavily argued with and never retracted, and no other source in
+the set reports that. Batched by DOI (probed: 60 DOIs in one POST returns `200`), so it costs one
+call per run:
+
+```
+_critique: PubPeer checked 3 DOI(s), 1 with comments — criticism is not retraction_
+**⚠ 17 PubPeer comment(s)** — criticised, not retracted — https://pubpeer.com/publications/B5B9…
+```
+
+Never cached, and never written into the result cache — comments accumulate while a DOI stays fixed.
+`--no-critique` skips it. PubPeer has no public API yet (its FAQ says one is coming), so this uses
+the devkey Zotero and `metacheck` use and is best-effort by construction.
+
+**A degraded retraction screen declares itself.** If OpenAlex fails, Crossref stands in — but
+Crossref is incomplete: measured, `filter=updates:` returns **0** notices for
+`10.1378/chest.128.6.3817`, a retraction OpenAlex knows about. So a fallback run says so:
+
+```
+> ⚠ RETRACTION SCREEN DEGRADED — HTTP 429. Fell back to Crossref for 2 of 3 DOI(s).
+  Crossref misses some retractions — it has no record of 10.1378/chest.128.6.3817 —
+  so a clean result here is unconfirmed, not clear.
+```
+
+That distinction matters: `DEGRADED` (checked, weakly) and `DID NOT RUN` (not checked) are different
+sentences, and neither is allowed to read as "clean". The rate limit is 3 requests/second, so the
+fallback paces itself and caps how many DOIs it will attempt, reporting `checked` out of `requested`.
+
+**Unpaywall and DataCite as backstops.** When OpenAlex has no open-access copy, Unpaywall is
+consulted — only if `CITEKIT_UNPAYWALL_EMAIL` is set, so an unconfigured backup never masks the
+source's own explanation. It adds **version provenance**: quoting a `submittedVersion` as though it
+were the published paper is a fidelity error in its own right. When OpenAlex 404s a DOI entirely,
+DataCite gets the final word, so a cited dataset is reported as a dataset instead of "not found".
+
+**`--since` answers "what's new".** It re-queries (ignoring the cache TTL) and diffs against the
+previous run of the same query, marking records `**NEW**` and dating the baseline. With no previous
+run it says `no previous run to compare against` rather than implying change.
+
 
 **Timestamp and cooldown is the right shape but not the whole answer**, because a TTL only bounds
 how old an answer may be — it never tells you *what you missed*. The real fix is a refresh that is

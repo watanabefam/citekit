@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Pre-commit: fast, OFFLINE checks only.
+#
+# A commit hook must never depend on the network. These suites are pure or use mocked fetches, so
+# they run in well under a second and cannot fail because a third party is down. Anything needing a
+# live API belongs in `node tests/fidelity.mjs --live`, which is run deliberately, not on commit.
+#
+# Install with:  ./scripts/install-hooks.sh
+# Block on orphan citations too:  CITEKIT_HOOK_STRICT=1 git commit ...
+set -u
+
+root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+cd "$root" || exit 0
+fail=0
+
+check() {
+  name="$1"; shift
+  if out=$("$@" 2>&1); then
+    printf '  \033[32m✓\033[0m %s\n' "$name"
+  else
+    printf '  \033[31m✗\033[0m %s FAILED\n' "$name"
+    printf '%s\n' "$out" | grep -E '✗|failed' | head -12 | sed 's/^/      /'
+    fail=1
+  fi
+}
+
+echo "citekit pre-commit"
+check "fidelity (offline)"  node tests/fidelity.mjs
+check "citation-walk"       node tests/citation-walk.mjs
+
+# Orphan citations in any staged markdown: cited in the prose, absent from Sources. That is the
+# fabricated-citation signal, so it is worth surfacing — but it is a warning by default because a
+# draft legitimately cites things before its bibliography is written.
+strict="${CITEKIT_HOOK_STRICT:-0}"
+for f in $(git diff --cached --name-only --diff-filter=ACM); do
+  case "$f" in *.md) ;; *) continue ;; esac
+  [ -f "$f" ] || continue
+  out=$(node tools/fidelity.mjs refs "$f" 2>&1) || true
+  orphans=$(printf '%s\n' "$out" | sed -n 's/.* \([0-9][0-9]*\) orphan citation.*/\1/p' | head -1)
+  if [ "${orphans:-0}" -gt 0 ] 2>/dev/null; then
+    printf '  \033[33m⚠\033[0m %s: %s orphan citation(s) — cited in prose, absent from Sources\n' "$f" "$orphans"
+    printf '%s\n' "$out" | sed -n '/orphan citation/,/uncited reference/p' | sed '$d' | sed 's/^/      /'
+    [ "$strict" = "1" ] && fail=1
+  fi
+done
+
+if [ "$fail" -ne 0 ]; then
+  printf '\ncommit blocked — fix the failures above, or use git commit --no-verify to bypass\n'
+fi
+exit "$fail"

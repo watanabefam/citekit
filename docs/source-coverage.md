@@ -186,18 +186,28 @@ for rate reasons is not worth it; adding them for coverage reasons (see above) i
 
 ## Recommended order
 
-| tier | source | why |
+Status after this round — the first two tiers are **built and tested**:
+
+| tier | source | status |
 |---|---|---|
-| 1 | **PubPeer** | the only candidate reporting information CiteKit cannot see at all; one batch call per run |
-| 1 | **DataCite** | new object type, keyless, CORS-open, trivial shape |
-| 2 | **SciELO** (CLI), **CiNii**, **OpenAIRE** | widest breadth gain; SciELO sends no CORS headers |
-| 2 | **bioRxiv / medRxiv** | preprints are where citation fidelity fails most, and they are cheap |
-| 3 | **NASA ADS**, **CourtListener** | open genuinely new domains (astro, law) behind free tokens; follow the `s2`/`core` opt-in pattern |
-| — | **zbMATH**, **Figshare**, **Open Library** | fine, low urgency; Open Library's host is unreliable |
+| 1 | **PubPeer** | **done** — `critiqueDois()`, batched at 50/call, runs on every search, `--no-critique` to skip. Proved on a live search: 17 comments surfaced on a paper that is not retracted |
+| 1 | **DataCite** | **done** — `dataciteDoi()`, consulted when OpenAlex 404s a DOI so a dataset is reported as a dataset |
+| 2 | **Unpaywall** | **done as a backstop** — `unpaywallDoi()`, used only when OpenAlex has no copy and only when `CITEKIT_UNPAYWALL_EMAIL` is set; adds `version` provenance |
+| 2 | **Crossref degraded screen** | **done** — self-declaring, paced at the measured 3 req/s, capped, reports `checked/requested` |
+| 2 | **SciELO** (CLI), **CiNii**, **OpenAIRE** | not built — measure the OpenAlex overlap first (below) |
+| 2 | **bioRxiv / medRxiv** | not built |
+| 3 | **NASA ADS**, **CourtListener** | not built — free tokens, follow the `s2`/`core` opt-in pattern |
+| — | **zbMATH**, **Figshare**, **Open Library** | not built, low urgency |
 | — | everything bot-walled or paid | do not attempt |
 
-If one thing is built: **PubPeer**. If two: **PubPeer + DataCite**. Breadth beyond that is better
-bought with CORS-clean regional APIs than with another general index.
+## Still open
+
+- **The overlap measurement.** Whether SciELO/CiNii records are already in OpenAlex is unmeasured —
+  the sampled 1998 SciELO article carries no DOI, so there was nothing to look up. Measure before
+  building either adapter.
+- **Whether a `$0` budget kills the nominally-free single-entity lookup.** Recorded as untested.
+- **A critique check has no notion of a stale comment count** — deliberately never cached, so a
+  repeat run re-asks PubPeer. That is one extra call per run; acceptable, but it is a cost.
 
 ## Out of scope
 

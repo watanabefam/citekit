@@ -1213,11 +1213,26 @@ export async function quotesOnline(markdown, {
         candidates.push({ url: near.value, how: 'url' });
       } else if (near.kind === 'doi' && online) {
         const oa = await openAlexOaUrls(near.value, fetchImpl, cacheDir);
-        if (!oa.urls.length) {
-          notes.push(`${near.value}: ${oa.reason || (oa.status === 'closed' ? 'closed access' : 'no open-access copy')}`);
-          continue;
+        if (oa.urls.length) {
+          for (const u of oa.urls) candidates.push({ url: u, how: 'openaccess', title: oa.title });
+        } else {
+          // OpenAlex has no copy. Unpaywall is the specialist at this question, and it also reports
+          // which VERSION each copy is: quoting a submitted manuscript as though it were the
+          // published paper is a fidelity error in its own right. Only consulted when configured,
+          // so an unconfigured backup never masks the source's own explanation.
+          const up = unpaywallEmail()
+            ? await unpaywallDoi(near.value, { fetchImpl, cacheRoot: cacheDir }).catch(() => null)
+            : null;
+          if (up?.urls?.length) {
+            for (const loc of up.locations) {
+              candidates.push({ url: loc.url, how: 'unpaywall', title: oa.title, version: loc.version });
+            }
+          } else {
+            notes.push(`${near.value}: ${up?.reason || oa.reason
+              || (oa.status === 'closed' ? 'closed access' : 'no open-access copy')}`);
+            continue;
+          }
         }
-        for (const u of oa.urls) candidates.push({ url: u, how: 'openaccess', title: oa.title });
       }
       if (!candidates.length) { notes.push(`${near.value}: no URL — add it to --map`); continue; }
 
@@ -1243,7 +1258,8 @@ export async function quotesOnline(markdown, {
 
     if (hit) {
       results.push({ ...q, ...hit.v, cite: hit.near.value, via: hit.usable.c.how,
-        url: hit.usable.c.url, sourceChars: hit.usable.src.chars });
+        url: hit.usable.c.url, sourceChars: hit.usable.src.chars,
+        version: hit.usable.c.version || undefined });
       continue;
     }
     // Accuse the quote only when EVERY source cited beside it was actually read. If any one was
@@ -1349,6 +1365,156 @@ export async function fetchOpenAlex(doi) {
   return getJSON(oaWorkUrl(d));
 }
 
+/* ============================ 6e. critique, datasets, and the open-access backup ============================ */
+
+// A small on-disk cache for lookups whose answers barely change (OA locations, dataset metadata).
+// Deliberately NOT used for anything that can change while its identifiers stay fixed — retraction
+// status and comment counts both fall in that category and are always fetched fresh.
+async function cachedJson(cacheRoot, ns, key, ttlMs, produce) {
+  const fs = requireSync('node:fs');
+  const crypto = requireSync('node:crypto');
+  const dir = `${cacheRoot}/${ns}`;
+  const file = `${dir}/${crypto.createHash('sha1').update(String(key)).digest('hex').slice(0, 16)}.json`;
+  try {
+    const hit = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (hit && Date.now() - hit.at < ttlMs) return { ...hit.value, cached: true };
+  } catch { /* miss */ }
+  const value = await produce();
+  if (value && !value.reason) {
+    try { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(file, JSON.stringify({ at: Date.now(), value })); } catch { /* best effort */ }
+  }
+  return value;
+}
+
+// --- PubPeer: post-publication critique, which is neither a citation nor a retraction ------------
+// Probed: POST with 60 DOIs answers 200, rate limit is 20 requests, response carries
+// {feedbacks:[{id (=DOI), total_comments, total_peeriodical_comments, users, url, last_commented_at}]}.
+// The devkey is the one Zotero and metacheck use; PubPeer has no public API yet, so this is
+// best-effort and must never be presented as exhaustive.
+export const PUBPEER_DEVKEY = 'PubPeerZotero';
+export const PUBPEER_CHUNK = 50;
+
+export function mapCritiqueResponse(json = {}) {
+  const out = new Map();
+  for (const f of json.feedbacks || []) {
+    const doi = strip(f.id).toLowerCase();
+    if (!doi) continue;
+    const comments = Number(f.total_comments || 0) + Number(f.total_peeriodical_comments || 0);
+    out.set(doi, {
+      comments,
+      url: f.url || null,
+      users: String(f.users || '').slice(0, 200) || null,
+      lastCommentedAt: f.last_commented_at || null,
+    });
+  }
+  return out;
+}
+
+export async function critiqueDois(dois, { fetchImpl = fetch } = {}) {
+  const list = [...new Set((Array.isArray(dois) ? dois : [dois]).map(strip).filter(Boolean))];
+  const hits = new Map();
+  const errors = [];
+  if (!list.length) return { hits, errors, requested: 0, checked: 0 };
+  for (let i = 0; i < list.length; i += PUBPEER_CHUNK) {
+    const chunk = list.slice(i, i + PUBPEER_CHUNK);
+    try {
+      const res = await fetchImpl(`https://pubpeer.com/v3/publications?devkey=${PUBPEER_DEVKEY}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dois: chunk }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      for (const [k, v] of mapCritiqueResponse(await res.json())) hits.set(k, v);
+    } catch (e) { errors.push(`PubPeer: ${e.message.slice(0, 70)}`); }
+  }
+  return { hits, errors, requested: list.length, checked: list.length };
+}
+
+// --- Unpaywall: the open-access location backup, and version provenance -------------------------
+// Requires an email (Unpaywall's rule, not a paid key). Probed: CORS `*`, no advertised rate limit,
+// 12/12 on a burst, and a 404 returns HTML rather than JSON — so the status is checked first.
+// Value over OpenAlex is not more locations but `version`: quoting a submittedVersion as if it were
+// the publishedVersion is exactly the class of error this tool exists to catch.
+export function unpaywallEmail() {
+  return process.env.CITEKIT_UNPAYWALL_EMAIL || '';
+}
+
+export async function unpaywallDoi(doi, { fetchImpl = fetch, cacheRoot = pdfCacheDir() } = {}) {
+  const email = unpaywallEmail();
+  if (!email) return { reason: 'no email set — export CITEKIT_UNPAYWALL_EMAIL to enable Unpaywall' };
+  const d = strip(doi);
+  return cachedJson(cacheRoot, 'unpaywall', d, 7 * 864e5, async () => {
+    try {
+      const res = await fetchImpl(`https://api.unpaywall.org/v2/${encodeURIComponent(d)}?email=${encodeURIComponent(email)}`);
+      if (res.status === 404) return { reason: 'not in Unpaywall' };
+      if (!res.ok) return { reason: `Unpaywall HTTP ${res.status}` };
+      const j = await res.json();
+      const locations = (j.oa_locations || []).map(l => ({
+        url: l.url_for_pdf || l.url_for_landing_page || null,
+        hostType: l.host_type || null,
+        version: l.version || null,
+      })).filter(l => l.url);
+      return { urls: locations.map(l => l.url), locations, isOa: !!j.is_oa, oaStatus: j.oa_status || null };
+    } catch (e) { return { reason: e.message.slice(0, 80) }; }
+  });
+}
+
+// --- DataCite: the "cited object is a dataset, not a paper" case ---------------------------------
+// Probed: single-DOI lookup answers 200 with CORS `*`. OpenAlex indexes many datasets but not all,
+// so a DOI that OpenAlex 404s may still be a real, citable object.
+export async function dataciteDoi(doi, { fetchImpl = fetch, cacheRoot = pdfCacheDir() } = {}) {
+  const d = strip(doi);
+  return cachedJson(cacheRoot, 'datacite', d, 7 * 864e5, async () => {
+    try {
+      const res = await fetchImpl(`https://api.datacite.org/dois/${encodeURIComponent(d)}`);
+      if (res.status === 404) return { reason: 'not in DataCite' };
+      if (!res.ok) return { reason: `DataCite HTTP ${res.status}` };
+      const j = await res.json();
+      const a = j?.data?.attributes || {};
+      return {
+        found: true,
+        kind: a?.types?.resourceTypeGeneral || null,
+        title: (a?.titles || [{}])[0]?.title || null,
+        year: a?.publicationYear || null,
+        publisher: a?.publisher || null,
+      };
+    } catch (e) { return { reason: e.message.slice(0, 80) }; }
+  });
+}
+
+// --- Crossref as a DEGRADED retraction backup ---------------------------------------------------
+// Measured: Crossref allows 3 requests per second (`x-rate-limit-limit: 3`), so this paces itself and
+// caps how many DOIs it will attempt rather than hammering. It is incomplete by construction —
+// `filter=updates:` returns 0 for 10.1378/chest.128.6.3817, a retraction that OpenAlex knows about —
+// so a result from here must be labelled degraded wherever it is shown.
+export const CROSSREF_MIN_INTERVAL_MS = 350;
+
+export async function crossrefRetractionFallback(dois, {
+  fetchImpl = fetch, max = 25, intervalMs = CROSSREF_MIN_INTERVAL_MS,
+} = {}) {
+  const list = [...new Set((Array.isArray(dois) ? dois : [dois]).map(strip).filter(Boolean))];
+  const capped = list.slice(0, max);
+  const hits = new Map();
+  const errors = [];
+  let last = 0;
+  for (const doi of capped) {
+    const wait = intervalMs - (Date.now() - last);
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    last = Date.now();
+    try {
+      const res = await fetchImpl('https://api.crossref.org/works?filter=updates:'
+        + encodeURIComponent(doi) + '&rows=5&select=DOI,type,update-to');
+      if (!res.ok) { errors.push(`${doi}: HTTP ${res.status}`); continue; }
+      const j = await res.json();
+      const items = j?.message?.items || [];
+      const notice = items.find(i => (i['update-to'] || []).some(u => String(u.type || '').includes('retraction')))
+        || items.find(i => String(i.type || '').includes('retraction'));
+      if (notice) hits.set(doi.toLowerCase(), { retracted: true, notice: notice.DOI || null });
+    } catch (e) { errors.push(`${doi}: ${e.message.slice(0, 60)}`); }
+  }
+  return { hits, errors, requested: list.length, checked: capped.length };
+}
+
 // One DOI, both registries, one verdict. OpenAlex supplies the type and the is_retracted flag;
 // Crossref supplies the relation and the notice metadata that OpenAlex lacks.
 export async function checkDoi(doi) {
@@ -1358,11 +1524,18 @@ export async function checkDoi(doi) {
   ]);
   const verdict = classifyRetraction({ crossref: cr, openalex: oa });
   const rec = oa ? oaToRecord(oa) : null;
+  // OpenAlex does not index every dataset or software record. A DOI it 404s may still be a real,
+  // citable object, and answering "unknown" for a live dataset is the same class of error as
+  // accusing a good paper — so DataCite gets the final word before the tool says "not found".
+  const dataset = !oa ? await dataciteDoi(doi).catch(() => null) : null;
   return {
     doi: strip(doi),
-    title: rec?.title || (cr?.message?.title || [])[0] || null,
+    title: rec?.title || (cr?.message?.title || [])[0] || dataset?.title || null,
     retraction: verdict,
     scope: rec ? claimScope({ ...rec, type: oa.type }) : null,
+    dataset: dataset?.found
+      ? { kind: dataset.kind, year: dataset.year, publisher: dataset.publisher }
+      : null,
   };
 }
 
@@ -1450,14 +1623,28 @@ export function oaWorkUrl(doi, extraQuery = '') {
 
 // Every "budget exhausted" looks identical to "nothing found" from the caller's side, so name the
 // actual cause and the actual fix.
+// Credentials must never reach a log, a markdown file or an agent's context. Error messages quote the
+// request URL, and the request URL carries the key — found by forcing a 401 and watching the banner
+// print `api_key=...` verbatim. Redact before quoting.
+export function redactUrl(u) {
+  return String(u)
+    .replace(/([?&]api_key=)[^&]*/gi, '$1REDACTED')
+    .replace(/([?&]email=)[^&]*/gi, '$1REDACTED');
+}
+
 export function openAlexError(status, url) {
+  const where = redactUrl(url);
   if (status === 429) {
     return new Error(openAlexKey()
       ? `OpenAlex rate/budget limit (HTTP 429) — your key's daily budget is spent; resets midnight UTC`
       : `OpenAlex budget exhausted (HTTP 429) — keyless requests share $0.10/day across this IP. `
         + `A free key gives $1/day: set CITEKIT_OPENALEX_KEY. Resets midnight UTC`);
   }
-  return new Error(`HTTP ${status} for ${url}`);
+  if (status === 401 || status === 403) {
+    return new Error(`OpenAlex rejected the API key (HTTP ${status}) at ${where} — check `
+      + `~/.config/citekit/openalex.key or unset CITEKIT_OPENALEX_KEY to run keyless`);
+  }
+  return new Error(`HTTP ${status} for ${where}`);
 }
 let _LL = null;
 function oaToRecord(w) {

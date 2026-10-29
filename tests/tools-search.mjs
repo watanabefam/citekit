@@ -67,6 +67,43 @@ const cleanMd = toMarkdown({
 });
 ok('no banner when the screen actually ran', !/RETRACTION SCREEN DID NOT RUN/.test(cleanMd));
 
+// A DEGRADED screen must announce that it is weaker, not merely quieter. Crossref misses some
+// retractions (it has no record of 10.1378/chest.128.6.3817), so silence would read as safety.
+const degradedMd = toMarkdown({
+  generated: 'now', per: 1, sources: ['openalex'],
+  screenDegraded: { reason: 'HTTP 429', method: 'crossref', checked: 2, requested: 3, retracted: 0 },
+  queries: { q: { count: 0, errors: [], records: [] } },
+});
+ok('a degraded retraction screen says it is weaker, not clear',
+   /RETRACTION SCREEN DEGRADED/.test(degradedMd) && /unconfirmed, not clear/.test(degradedMd));
+ok('the degraded banner reports coverage and the known Crossref blind spot',
+   /2 of 3 DOI/.test(degradedMd) && /10\.1378\/chest\.128\.6\.3817/.test(degradedMd));
+
+const critMd = toMarkdown({
+  generated: 'now', per: 1, sources: ['openalex'],
+  critique: { dois: 2, withComments: 1, errors: [] },
+  queries: { q: { count: 1, errors: [], records: [
+    { title: 'T', doi: '10.1/a', critique: { comments: 5, url: 'https://pubpeer.com/x' } },
+  ] } },
+});
+ok('a criticised paper is flagged as criticised, NOT as retracted',
+   /5 PubPeer comment\(s\)/.test(critMd) && /criticised, not retracted/.test(critMd));
+ok('a record without comments gets no critique mark',
+   !/PubPeer comment/.test(toMarkdown({ generated: 'now', per: 1, sources: ['openalex'],
+     queries: { q: { count: 1, errors: [], records: [{ title: 'Clean', doi: '10.1/b' }] } } })));
+
+const sinceMd = toMarkdown({
+  generated: 'now', per: 1, sources: ['openalex'],
+  queries: { q: { count: 1, errors: [], records: [{ title: 'N', doi: '10.1/n', isNew: true }],
+    newSince: { baselineKnown: true, baselineAt: Date.now(), count: 1 } } },
+});
+ok('--since marks new records and dates the baseline', /1 new since \d{4}-/.test(sinceMd) && /\*\*NEW\*\*/.test(sinceMd));
+const noBaseMd = toMarkdown({ generated: 'now', per: 1, sources: ['openalex'],
+  queries: { q: { count: 1, errors: [], records: [{ title: 'N', isNew: true }],
+    newSince: { baselineKnown: false, baselineAt: null, count: 1 } } } });
+ok('with no previous run --since says so instead of implying change',
+   /no previous run to compare against/.test(noBaseMd));
+
 // Result cache: discovery is cached, retraction status is not.
 const cacheDir = fs.mkdtempSync(`${os.tmpdir()}/ck-cache-`);
 const cacheRun = (extra = []) => {

@@ -28,14 +28,14 @@ import { screenDois } from './fidelity.mjs';
 // One key resolution for both tools: env var first, then ~/.config/citekit/openalex.key.
 // search.mjs previously read only the env var, so a key placed in the file (the documented way,
 // and the same convention as tavily.key) was silently ignored by every search.
-import { openAlexKey } from './fidelity.mjs';
+import { openAlexKey, critiqueDois, crossrefRetractionFallback } from './fidelity.mjs';
 
 const KEYLESS = ['openalex', 'crossref', 'epmc', 'pubmed', 'eric', 'doaj'];
 const OPT_IN = ['s2', 'arxiv', 'core'];
 
 function parseArgs(argv) {
   const o = { queries: [], per: 8, sources: KEYLESS.slice(), oaOnly: false, yearFrom: '', json: false, md: false, out: '', enrich: true, help: false, listSources: false,
-    fresh: false, maxAge: 6,
+    fresh: false, maxAge: 6, since: false, noCritique: false,
     proxy: process.env.CITEKIT_PROXY || '', openalexKey: openAlexKey(),
     s2Key: process.env.CITEKIT_S2_KEY || '', coreKey: process.env.CITEKIT_CORE_KEY || '',
     tavilyKey: process.env.CITEKIT_TAVILY_KEY || process.env.TAVILY_API_KEY || '',
@@ -53,6 +53,8 @@ function parseArgs(argv) {
     else if (a === '--no-screen') o.noScreen = true;
     else if (a === '--fresh') o.fresh = true;
     else if (a === '--max-age') o.maxAge = Math.max(0, parseFloat(argv[++i]) || 0);
+    else if (a === '--since') o.since = true;
+    else if (a === '--no-critique') o.noCritique = true;
     else if (a === '--queries') o.queriesFile = argv[++i];
     else if (a === '--proxy') o.proxy = argv[++i];
     else if (a === '--openalex-key') o.openalexKey = argv[++i];
@@ -94,6 +96,8 @@ Flags
   --no-screen        skip the retraction screen (one batched OpenAlex call otherwise)
   --fresh            ignore the result cache and re-query every source
   --max-age H        reuse cached results up to H hours old (default 6; 0 = never)
+  --since            re-query and mark what is NEW since the last run of the same query
+  --no-critique      skip the PubPeer critique check (one batched call otherwise)
   --queries FILE     read a JSON array of strings or {q|query} objects
   --list-sources     print known sources and exit
 
@@ -169,9 +173,15 @@ async function main() {
       .update(JSON.stringify({ q: query, s: chosen, per: o.per, enrich: !!o.enrich, yf: o.yearFrom }))
       .digest('hex').slice(0, 20);
     const cfile = `${cacheDir}/${ckey}.json`;
-    if (!o.fresh) {
+    // --since needs BOTH halves: it ignores the cache so results are current, but still reads the
+    // cache as the baseline to diff against. Reading and reusing are different decisions.
+    let baseline = null;
+    if (o.since || !o.fresh) {
+      try { baseline = JSON.parse(fs.readFileSync(cfile, 'utf8')); } catch { baseline = null; }
+    }
+    if (!o.fresh && !o.since) {
       try {
-        const c = JSON.parse(fs.readFileSync(cfile, 'utf8'));
+        const c = baseline;
         if (c && Array.isArray(c.records) && Date.now() - c.at <= o.maxAge * 3600e3) {
           out.cache = out.cache || { hits: 0, misses: 0, maxAge: o.maxAge };
           out.cache.hits++;
@@ -202,6 +212,19 @@ async function main() {
     } catch (e) { errs.push('rank/enrich: ' + e.message); }
     process.stderr.write(`   ${all.length} raw → ${ranked.length} unique${errs.length ? ' · errors: ' + errs.join(' | ') : ''}\n`);
     out.queries[query] = { count: ranked.length, errors: errs, records: ranked };
+    if (o.since) {
+      // What is NEW relative to the last run of this same query. Without a baseline there is nothing
+      // to compare against, so everything is new and the output says so rather than implying change.
+      const ident = r => String(r.doi || r.title || '').toLowerCase();
+      const prev = new Set((baseline?.records || []).map(ident));
+      const fresh = ranked.filter(r => !prev.has(ident(r)));
+      for (const r of fresh) r.isNew = true;
+      out.queries[query].newSince = {
+        baselineAt: baseline?.at || null,
+        baselineKnown: !!(baseline && Array.isArray(baseline.records)),
+        count: fresh.length,
+      };
+    }
     out.cache = out.cache || { hits: 0, misses: 0, maxAge: o.maxAge };
     out.cache.misses++;
     try {
@@ -222,9 +245,9 @@ async function main() {
     const all = Object.values(out.queries).flatMap(q => q.records).filter(r => r.doi);
     const dois = [...new Set(all.map(r => r.doi))];
     if (dois.length) {
+      let flagged = 0;
       try {
         const verdicts = await screenDois(dois);
-        let flagged = 0;
         for (const q of Object.values(out.queries)) {
           for (const r of q.records) {
             const v = verdicts.get(String(r.doi || '').toLowerCase());
@@ -242,10 +265,62 @@ async function main() {
           process.stderr.write(`   screened ${dois.length} DOIs: no retraction on record\n`);
         }
       } catch (e) {
-        // stderr alone is not enough: an agent reading the results would see no retraction warnings
-        // and read that as "nothing retracted", when in fact nothing was checked.
-        out.screenFailed = { reason: e.message, dois: dois.length };
-        process.stderr.write(`   retraction screen unavailable: ${e.message}\n`);
+        // OpenAlex is unavailable. Crossref can stand in, but it is INCOMPLETE — measured: it
+        // returns 0 notices for 10.1378/chest.128.6.3817, a retraction OpenAlex knows about. So the
+        // fallback runs AND says it is weaker. A silent substitution would recreate exactly the bug
+        // this screen exists to prevent: no warning reading as no problem.
+        let fb = { hits: new Map(), errors: [], requested: dois.length, checked: 0 };
+        try { fb = await crossrefRetractionFallback(dois); } catch { /* no fallback available */ }
+        for (const r of all) {
+          const v = fb.hits.get(String(r.doi || '').toLowerCase());
+          if (!v) continue;
+          r.retraction = { status: 'retracted', noticeType: 'retraction', evidence: ['crossref-updates'] };
+          flagged++;
+        }
+        if (fb.checked) {
+          out.screenDegraded = {
+            reason: e.message, method: 'crossref',
+            checked: fb.checked, requested: fb.requested, retracted: flagged,
+          };
+          process.stderr.write(`   retraction screen DEGRADED: ${e.message} — Crossref fallback `
+            + `checked ${fb.checked}/${fb.requested} DOIs and can miss retractions\n`);
+        } else {
+          out.screenFailed = { reason: e.message, dois: dois.length };
+          process.stderr.write(`   retraction screen unavailable: ${e.message}\n`);
+        }
+      }
+    }
+  }
+
+  /* Critique screen — PubPeer. A different question from "is it retracted": "has it been argued
+     with". Batchable by DOI (probed: 60 DOIs in one POST returns 200), so one call per run. Never
+     cached and never stored in the search cache: comments accumulate while a DOI stays fixed. */
+  if (!o.noCritique) {
+    const all = Object.values(out.queries).flatMap(q => q.records).filter(r => r.doi);
+    const dois = [...new Set(all.map(r => String(r.doi).toLowerCase()))];
+    if (dois.length) {
+      try {
+        const { hits, errors } = await critiqueDois(dois);
+        let withComments = 0;
+        for (const r of all) {
+          const c = hits.get(String(r.doi || '').toLowerCase());
+          if (!c || !c.comments) continue;
+          r.critique = c;
+          withComments++;
+        }
+        out.critique = { dois: dois.length, withComments, errors };
+        if (withComments) {
+          process.stderr.write(`\n\u26a0 ${withComments} record(s) carry PubPeer comments `
+            + `(not retracted — criticised):\n`);
+          for (const r of all.filter(x => x.critique)) {
+            process.stderr.write(`   ${r.doi}  ${r.critique.comments} comment(s)\n`);
+          }
+        } else {
+          process.stderr.write(`   critique: no PubPeer comments on ${dois.length} DOI(s)\n`);
+        }
+      } catch (e) {
+        out.critique = { dois: dois.length, errors: [String(e.message).slice(0, 80)] };
+        process.stderr.write(`   critique screen unavailable: ${e.message}\n`);
       }
     }
   }
@@ -268,8 +343,24 @@ export function toMarkdown(out) {
     lines.push('', `_cache: ${out.cache.hits} hit \u00b7 ${out.cache.misses} miss \u00b7 max age ${out.cache.maxAge}h `
       + `\u2014 discovery is cached, **retraction status is always re-checked**; use --fresh to bypass_`);
   }
+  if (out.screenDegraded) {
+    lines.push('', `> **\u26a0 RETRACTION SCREEN DEGRADED** \u2014 ${out.screenDegraded.reason}. Fell back `
+      + `to Crossref for ${out.screenDegraded.checked} of ${out.screenDegraded.requested} DOI(s). `
+      + `Crossref misses some retractions \u2014 it has no record of 10.1378/chest.128.6.3817 \u2014 so a `
+      + `clean result here is unconfirmed, not clear.`);
+  }
+  if (out.critique) {
+    lines.push('', `_critique: PubPeer checked ${out.critique.dois} DOI(s), ${out.critique.withComments} `
+      + `with comments${out.critique.errors?.length ? ' \u00b7 ' + out.critique.errors.join(' | ') : ''} `
+      + `\u2014 criticism is not retraction_`);
+  }
   for (const [query, res] of Object.entries(out.queries)) {
-    lines.push(`\n## ${query}`, `_${res.count} unique${res.cachedAt ? ` · cached ${humanAge(res.cachedAt)} ago` : ''}${res.errors.length ? ' · ' + res.errors.join(' | ') : ''}_\n`);
+    const since = res.newSince
+      ? ` \u00b7 ${res.newSince.count} new${res.newSince.baselineKnown
+        ? ` since ${new Date(res.newSince.baselineAt).toISOString().slice(0, 16).replace('T', ' ')}`
+        : ' (no previous run to compare against)'}`
+      : '';
+    lines.push(`\n## ${query}`, `_${res.count} unique${res.cachedAt ? ` · cached ${humanAge(res.cachedAt)} ago` : ''}${since}${res.errors.length ? ' · ' + res.errors.join(' | ') : ''}_\n`);
     for (const r of res.records) {
       const abs = (r.abstract || '').replace(/\s+/g, ' ').slice(0, 500);
       lines.push(...[
@@ -280,6 +371,8 @@ export function toMarkdown(out) {
         `**DOI:** ${r.doi || '—'}${r.url ? `  ·  ${r.url}` : ''}${r.pdf ? `\n**PDF:** ${r.pdf}` : ''}`,
         r.retraction?.status === 'retracted' ? `**\u26a0 RETRACTED** \u2014 do not cite (detected via ${r.retraction.evidence.join(', ')})` : '',
         r.retraction?.status === 'is-a-notice' ? '**Notice of retraction** \u2014 this record is the notice, not the retracted work' : '',
+        r.critique ? `**\u26a0 ${r.critique.comments} PubPeer comment(s)** \u2014 criticised, not retracted${r.critique.url ? ` \u2014 ${r.critique.url}` : ''}` : '',
+        r.isNew ? '**NEW** \u2014 not present in the previous run of this query' : '',
         abs ? `\n${abs}` : '\n_[no abstract]_', '',
       ].filter(x => x !== ''));
     }
