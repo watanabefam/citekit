@@ -29,12 +29,14 @@ check "fidelity (offline)"  node tests/fidelity.mjs
 check "citation-walk"       node tests/citation-walk.mjs
 
 # Orphan citations in any staged markdown: cited in the prose, absent from Sources. That is the
-# fabricated-citation signal, so it is worth surfacing — but it is a warning by default because a
-# draft legitimately cites things before its bibliography is written.
+# fabricated-citation signal, so it is worth surfacing — but only for documents that actually claim a
+# bibliography. Running it on a README that merely *discusses* citations produces pure noise
+# ("Chromium 2026", "Researched 2026"), which teaches people to ignore the warning.
 strict="${CITEKIT_HOOK_STRICT:-0}"
 for f in $(git diff --cached --name-only --diff-filter=ACM); do
   case "$f" in *.md) ;; *) continue ;; esac
   [ -f "$f" ] || continue
+  grep -qiE '^#{1,6}[[:space:]]+\**sources' "$f" || continue
   out=$(node tools/fidelity.mjs refs "$f" 2>&1) || true
   orphans=$(printf '%s\n' "$out" | sed -n 's/.* \([0-9][0-9]*\) orphan citation.*/\1/p' | head -1)
   if [ "${orphans:-0}" -gt 0 ] 2>/dev/null; then
