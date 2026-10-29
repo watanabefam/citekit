@@ -31,6 +31,7 @@ const OPT_IN = ['s2', 'arxiv', 'core'];
 
 function parseArgs(argv) {
   const o = { queries: [], per: 8, sources: KEYLESS.slice(), oaOnly: false, yearFrom: '', json: false, md: false, out: '', enrich: true, help: false, listSources: false,
+    fresh: false, maxAge: 6,
     proxy: process.env.CITEKIT_PROXY || '', openalexKey: process.env.CITEKIT_OPENALEX_KEY || '',
     s2Key: process.env.CITEKIT_S2_KEY || '', coreKey: process.env.CITEKIT_CORE_KEY || '',
     tavilyKey: process.env.CITEKIT_TAVILY_KEY || process.env.TAVILY_API_KEY || '',
@@ -46,6 +47,8 @@ function parseArgs(argv) {
     else if (a === '--out') o.out = argv[++i];
     else if (a === '--no-enrich') o.enrich = false;
     else if (a === '--no-screen') o.noScreen = true;
+    else if (a === '--fresh') o.fresh = true;
+    else if (a === '--max-age') o.maxAge = Math.max(0, parseFloat(argv[++i]) || 0);
     else if (a === '--queries') o.queriesFile = argv[++i];
     else if (a === '--proxy') o.proxy = argv[++i];
     else if (a === '--openalex-key') o.openalexKey = argv[++i];
@@ -85,6 +88,8 @@ Flags
   --out FILE         write output to FILE instead of stdout
   --no-enrich        skip the OpenAlex metadata-enrichment pass (saves metered OpenAlex calls)
   --no-screen        skip the retraction screen (one batched OpenAlex call otherwise)
+  --fresh            ignore the result cache and re-query every source
+  --max-age H        reuse cached results up to H hours old (default 6; 0 = never)
   --queries FILE     read a JSON array of strings or {q|query} objects
   --list-sources     print known sources and exit
 
@@ -96,6 +101,13 @@ Credentials (or the CITEKIT_* env vars of the same name)
   --tavily-key K     optional Tavily key for web (keyless works with limits)
   --web-domains csv  optional Tavily include-list, e.g. who.int,cdc.gov
   --web-time RANGE   optional Tavily recency: day|week|month|year`;
+
+const humanAge = ms => {
+  const m = Math.max(0, Math.round((Date.now() - ms) / 60000));
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  return h < 48 ? `${h}h` : `${Math.round(h / 24)}d`;
+};
 
 async function main() {
   const o = parseArgs(process.argv.slice(2));
@@ -138,8 +150,35 @@ async function main() {
 
   const opts = { oaOnly: o.oaOnly, yearFrom: o.yearFrom, per: o.per };
   const out = { generated: new Date().toISOString(), per: o.per, sources: chosen, queries: {} };
+  const { homedir } = await import('node:os');
+  const crypto = await import('node:crypto');
+  const cacheDir = process.env.CITEKIT_CACHE_DIR || `${homedir()}/.cache/citekit/search`;
+
   for (const query of o.queries) {
     process.stderr.write(`\n## ${query}\n`);
+
+    /* Discovery is cacheable; RETRACTION STATUS IS NOT. The cache stores what the sources returned
+       and nothing else — the screen below always re-runs, because a paper's standing can change
+       while its title, year and DOI cannot. Caching a clean verdict would be the one stale value
+       that actually hurts someone. */
+    const ckey = crypto.createHash('sha1')
+      .update(JSON.stringify({ q: query, s: chosen, per: o.per, enrich: !!o.enrich, yf: o.yearFrom }))
+      .digest('hex').slice(0, 20);
+    const cfile = `${cacheDir}/${ckey}.json`;
+    if (!o.fresh) {
+      try {
+        const c = JSON.parse(fs.readFileSync(cfile, 'utf8'));
+        if (c && Array.isArray(c.records) && Date.now() - c.at <= o.maxAge * 3600e3) {
+          out.cache = out.cache || { hits: 0, misses: 0, maxAge: o.maxAge };
+          out.cache.hits++;
+          out.queries[query] = { count: c.records.length, errors: c.errors || [], records: c.records, cachedAt: c.at };
+          process.stderr.write(`   cache hit: ${c.records.length} records, ${humanAge(c.at)} old `
+            + `(retraction screen still runs fresh)\n`);
+          continue;
+        }
+      } catch { /* miss or expired */ }
+    }
+
     const settled = await Promise.allSettled(chosen.map(s => registry[s](query, opts)));
     const all = [], errs = [];
     settled.forEach((res, i) => {
@@ -159,6 +198,12 @@ async function main() {
     } catch (e) { errs.push('rank/enrich: ' + e.message); }
     process.stderr.write(`   ${all.length} raw → ${ranked.length} unique${errs.length ? ' · errors: ' + errs.join(' | ') : ''}\n`);
     out.queries[query] = { count: ranked.length, errors: errs, records: ranked };
+    out.cache = out.cache || { hits: 0, misses: 0, maxAge: o.maxAge };
+    out.cache.misses++;
+    try {
+      fs.mkdirSync(cacheDir, { recursive: true });
+      fs.writeFileSync(cfile, JSON.stringify({ at: Date.now(), records: ranked, errors: errs }));
+    } catch { /* cache write is best-effort */ }
   }
 
   /* Retraction screen — one batched OpenAlex call across EVERY query in this run.
@@ -215,8 +260,12 @@ export function toMarkdown(out) {
       + `${out.screenFailed.dois} DOI(s) were NOT checked, so the absence of a warning below means `
       + `nothing. Re-run before relying on these results.`);
   }
+  if (out.cache) {
+    lines.push('', `_cache: ${out.cache.hits} hit \u00b7 ${out.cache.misses} miss \u00b7 max age ${out.cache.maxAge}h `
+      + `\u2014 discovery is cached, **retraction status is always re-checked**; use --fresh to bypass_`);
+  }
   for (const [query, res] of Object.entries(out.queries)) {
-    lines.push(`\n## ${query}`, `_${res.count} unique${res.errors.length ? ' · ' + res.errors.join(' | ') : ''}_\n`);
+    lines.push(`\n## ${query}`, `_${res.count} unique${res.cachedAt ? ` · cached ${humanAge(res.cachedAt)} ago` : ''}${res.errors.length ? ' · ' + res.errors.join(' | ') : ''}_\n`);
     for (const r of res.records) {
       const abs = (r.abstract || '').replace(/\s+/g, ' ').slice(0, 500);
       lines.push(...[

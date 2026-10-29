@@ -26,7 +26,12 @@
 //   node tools/fidelity.mjs draft ../family/habits/prayer.md # audit a draft's prose
 //   node tools/fidelity.mjs draft FILE --strict              # exit 1 on any HARD relay
 
+import { createRequire } from 'node:module';
 import { loadLL } from './load-ll.mjs';
+
+// `require` does not exist in an ES module, and a bare require inside a try/catch fails silently —
+// which is how the first version of the key-file fallback never worked at all.
+const requireSync = createRequire(import.meta.url);
 
 /* ============================ vocabularies ============================ */
 
@@ -1307,10 +1312,30 @@ async function getJSON(url, timeoutMs = 20000, headers = {}) {
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {
     const res = await fetch(url, { signal: ctl.signal, headers: { Accept: 'application/json', ...headers } });
+    // OpenAlex reports remaining budget on EVERY response. Reading it turns "worked, then suddenly
+    // 429" into a visible number, which is the only way to catch exhaustion before it happens.
+    if (/api\.openalex\.org/.test(url)) {
+      const rem = res.headers.get('x-ratelimit-remaining-usd');
+      const lim = res.headers.get('x-ratelimit-limit-usd');
+      if (rem != null) _budget = { remainingUsd: Number(rem), limitUsd: lim != null ? Number(lim) : null };
+    }
     if (res.status === 404) return null;
     if (!res.ok) throw (/api\.openalex\.org/.test(url) ? openAlexError(res.status, url) : new Error(`HTTP ${res.status} for ${url}`));
     return await res.json();
   } finally { clearTimeout(timer); }
+}
+
+// The most recent OpenAlex budget reading, for callers that want to warn before it runs out.
+let _budget = null;
+export function openAlexBudget() { return _budget; }
+
+export function openAlexBudgetWarning() {
+  const b = _budget;
+  if (!b || b.limitUsd == null || !b.limitUsd) return null;
+  const pct = b.remainingUsd / b.limitUsd;
+  if (pct > 0.2) return null;
+  return `OpenAlex budget low: $${b.remainingUsd.toFixed(4)} of $${b.limitUsd.toFixed(2)} left `
+    + `(${Math.round(pct * 100)}%). Set CITEKIT_OPENALEX_KEY for $1/day instead of the shared $0.10.`;
 }
 
 export async function fetchCrossref(doi) {
@@ -1400,7 +1425,15 @@ export async function screenDois(dois) {
 // list+filter is $0.0001, full-text search is $0.001 — so caching and doing fewer searches matter
 // far more than batching lookups, which are already free.
 export function openAlexKey() {
-  return process.env.CITEKIT_OPENALEX_KEY || process.env.OPENALEX_API_KEY || '';
+  const fromEnv = process.env.CITEKIT_OPENALEX_KEY || process.env.OPENALEX_API_KEY || '';
+  if (fromEnv) return fromEnv.trim();
+  // Same convention as ~/.config/citekit/tavily.key, so a key can live in a file with 600 perms
+  // instead of in shell history or a chat message.
+  try {
+    const fs = requireSync('node:fs');
+    const p = `${process.env.HOME || ''}/.config/citekit/openalex.key`;
+    return fs.readFileSync(p, 'utf8').trim();
+  } catch { return ''; }
 }
 
 export function openAlexKeyParam() {
@@ -1688,6 +1721,8 @@ async function main() {
       }
     }
     if (process.argv.includes('--strict') && r.notFound.length) process.exit(1);
+    const bw = openAlexBudgetWarning();
+    if (bw) console.error('\n' + bw);
     return;
   }
 

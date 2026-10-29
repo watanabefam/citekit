@@ -333,7 +333,7 @@ node tools/fidelity.mjs quotes FILE.md --online            # verify quotations a
 node tools/fidelity.mjs refs FILE.md                       # orphan citations, uncited references
 node tools/fidelity.mjs sources                            # cached sources + their token cost
 node tools/fidelity.mjs passage URL --grep "phrase"        # one passage, not the whole paper
-node tests/fidelity.mjs [--live]                           # 174 assertions, 3 live probes
+node tests/fidelity.mjs [--live]                           # 176 assertions, 3 live probes
 ```
 
 **Four checks over already-fetched payloads, plus two that read the draft's sources.** The suite
@@ -515,16 +515,67 @@ and raises the per-second limit from 10 to 30. Set it once:
 export CITEKIT_OPENALEX_KEY=...        # or OPENALEX_API_KEY; reuses the app's own setting name
 ```
 
-A 429 now says which of those it is and what to do, rather than surfacing `HTTP 429`. On the tooling
-side the mitigations are caching, not batching: work metadata is cached for 7 days under
-`~/.cache/citekit/src/oa/`, and fetched source text under `~/.cache/citekit/src/`, so a repeat run
-does no network work at all.
+A 429 now says which of those it is and what to do, rather than surfacing `HTTP 429`. Every response
+also carries `x-ratelimit-remaining-usd`, so the tool reads your live balance and warns before it
+runs out instead of after:
 
-| Run | Network |
+```
+OpenAlex budget low: $0.0071 of $0.10 left (7%). Set CITEKIT_OPENALEX_KEY for $1/day
+instead of the shared $0.10.
+```
+
+Put the key in a file rather than in shell history — the same convention as `tavily.key`:
+
+```bash
+mkdir -p ~/.config/citekit && chmod 700 ~/.config/citekit
+printf '%s' 'YOUR_KEY' > ~/.config/citekit/openalex.key && chmod 600 ~/.config/citekit/openalex.key
+```
+
+`CITEKIT_OPENALEX_KEY` / `OPENALEX_API_KEY` take precedence if set. `search.mjs` reads the same
+variable and also accepts `--openalex-key`.
+
+#### Caching search results without hiding new papers
+
+A search cache is where honesty gets hard: a stale result set is indistinguishable from a current
+one unless you say so. Three things this had to establish first, by probing rather than assuming:
+
+| question | answer |
 |---|---|
-| first pass over a document | one lookup per DOI-cited quotation |
-| second pass | none — OA metadata and source text both come from cache |
-| a run where every citation resolves through `--map` | none at all — no OpenAlex call is made |
+| Does OpenAlex support `ETag` / `If-None-Match`? | **No** — no `ETag`, no `Last-Modified`, no `Cache-Control`. Revalidation is always a full, charged search |
+| Is `from_created_date` (index-changed-since) available? | **No** — "part of daily sync, which comes with the Member+ and Partner plans" |
+| Is `from_publication_date` available free? | **Yes** — an ordinary filter |
+
+So on the free tier there is no cheap revalidation and no true delta sync. Cached results are
+labelled instead:
+
+```bash
+node tools/search.mjs "structured literacy" --sources openalex      # reuse up to 6h
+node tools/search.mjs "structured literacy" --max-age 1             # fresher
+node tools/search.mjs "structured literacy" --fresh                 # bypass entirely
+```
+
+The age appears in the output, always — `_12 unique · cached 3h ago_` — so a stale set can never be
+mistaken for a fresh one. What is cached is **discovery only**: titles, years, DOIs, abstracts. The
+**retraction screen always re-runs**, because a paper's standing can change while its metadata
+cannot. That is the one stale value that could actually hurt someone, so it is never stored:
+
+```
+_cache: 1 hit · 0 miss · max age 6h — discovery is cached, retraction status is always re-checked
+```
+
+**Timestamp and cooldown is the right shape but not the whole answer**, because a TTL only bounds
+how old an answer may be — it never tells you *what you missed*. The real fix is a refresh that is
+additive. On the free tier the closest available is `from_publication_date`, which costs one
+list-filter call:
+
+```
+https://api.openalex.org/works?filter=from_publication_date:2026-10-01,default.search:structured+literacy
+```
+
+Its blind spot is worth stating: it finds works *published* since a date, not works *added to the
+index* since one. A paper loaded into OpenAlex late, with an old publication date, will not appear —
+and only the Member+ `from_created_date` filter can catch that. For anything load-bearing, `--fresh`
+is the correct flag.
 
 **`best_oa_location` is not authoritative.** For `10.48550/arXiv.1706.03762` (Attention Is All You
 Need) OpenAlex returns the correct title but a `best_oa_location` pointing at an unrelated preprint

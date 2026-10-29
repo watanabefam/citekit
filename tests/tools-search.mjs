@@ -1,7 +1,7 @@
 // Smoke-test for tools/search.mjs — the headless CLI.
 // Runs the CLI as a subprocess (real argv handling) and checks the contract an intake workflow
 // depends on: complete records, authors present, clean JSON, no flag values parsed as queries.
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -66,6 +66,29 @@ const cleanMd = toMarkdown({
   queries: { q: { count: 0, errors: [], records: [] } },
 });
 ok('no banner when the screen actually ran', !/RETRACTION SCREEN DID NOT RUN/.test(cleanMd));
+
+// Result cache: discovery is cached, retraction status is not.
+const cacheDir = fs.mkdtempSync(`${os.tmpdir()}/ck-cache-`);
+const cacheRun = (extra = []) => {
+  const outFile = path.join(cacheDir, `o-${Math.random().toString(36).slice(2)}.md`);
+  const r = spawnSync(process.execPath, [path.join(ROOT, 'tools', 'search.mjs'),
+    'cache probe query', '--sources', 'crossref', '--per', '2', '--out', outFile, ...extra,
+  ], { env: { ...process.env, CITEKIT_CACHE_DIR: cacheDir }, encoding: 'utf8' });
+  return { md: fs.readFileSync(outFile, 'utf8'), err: r.stderr || '' };
+};
+const cold = cacheRun(['--fresh']).md;
+ok('a fresh run records a cache miss', /_cache: 0 hit · 1 miss/.test(cold));
+const warmRun = cacheRun();
+const warm = warmRun.md;
+ok('a second run is served from the cache', /_cache: 1 hit · 0 miss/.test(warm));
+ok('the cached age is printed, so stale results are never silent', /cached \d+m ago/.test(warm));
+const forced = cacheRun(['--max-age', '0']).md;
+ok('--max-age 0 bypasses the cache', /_cache: 0 hit · 1 miss/.test(forced));
+// A cache hit must never suppress the retraction screen: a paper can be retracted while its
+// title, year and DOI stay the same.
+ok('the retraction screen still runs on a cache hit',
+   /screened \d+ DOIs/.test(warmRun.err) && !/RETRACTION SCREEN DID NOT RUN/.test(warm));
+fs.rmSync(cacheDir, { recursive: true, force: true });
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

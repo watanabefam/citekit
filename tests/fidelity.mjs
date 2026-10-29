@@ -723,6 +723,8 @@ section('16. cached sources and passage retrieval');
 section('17. OpenAlex budget, batching and caching');
 
 {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
   // OpenAlex caps OR at 100 values and per_page at 100. Both were violated: >100 DOIs failed the
   // whole request, and per-page=50 silently truncated, so DOIs past the fiftieth looked clean.
   const many = Array.from({ length: 150 }, (_, i) => `10.1000/d${i}`);
@@ -744,14 +746,29 @@ section('17. OpenAlex budget, batching and caching');
   ok(!/api_key=/.test(screenUrl(['10.1000/x'])), 'no key, no api_key parameter');
   if (before !== undefined) process.env.CITEKIT_OPENALEX_KEY = before;
 
+  // The key may live in a file (~/.config/citekit/openalex.key), matching the tavily.key
+  // convention. This assertion exists because the first implementation used `require` in an ES
+  // module inside a try/catch, which failed silently and never read the file at all.
+  const homeBefore = process.env.HOME;
+  const tmpHome = fs.mkdtempSync(`${os.tmpdir()}/ck-home-`);
+  fs.mkdirSync(`${tmpHome}/.config/citekit`, { recursive: true });
+  fs.writeFileSync(`${tmpHome}/.config/citekit/openalex.key`, 'file-key-456\n');
+  process.env.HOME = tmpHome;
+  delete process.env.CITEKIT_OPENALEX_KEY;
+  ok(openAlexKey() === 'file-key-456', 'a key file is read when no env var is set', `got "${openAlexKey()}"`);
+  process.env.CITEKIT_OPENALEX_KEY = 'env-wins';
+  ok(openAlexKey() === 'env-wins', 'the env var takes precedence over the file');
+  delete process.env.CITEKIT_OPENALEX_KEY;
+  process.env.HOME = homeBefore;
+  fs.rmSync(tmpHome, { recursive: true, force: true });
+  if (before !== undefined) process.env.CITEKIT_OPENALEX_KEY = before;
+
   ok(/budget exhausted/.test(openAlexError(429, 'u').message)
     && /CITEKIT_OPENALEX_KEY/.test(openAlexError(429, 'u').message),
     'a 429 names the cause and the fix instead of saying "HTTP 429"');
   ok(!/budget/.test(openAlexError(500, 'u').message), 'a non-429 error is not misdescribed as budget');
 
   // The OA lookup cache: second call must not re-fetch.
-  const fs = await import('node:fs');
-  const os = await import('node:os');
   const cdir = fs.mkdtempSync(`${os.tmpdir()}/ck-oa-`);
   let calls = 0;
   const counting = async (url) => {
