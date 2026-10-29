@@ -333,7 +333,7 @@ node tools/fidelity.mjs quotes FILE.md --online            # verify quotations a
 node tools/fidelity.mjs refs FILE.md                       # orphan citations, uncited references
 node tools/fidelity.mjs sources                            # cached sources + their token cost
 node tools/fidelity.mjs passage URL --grep "phrase"        # one passage, not the whole paper
-node tests/fidelity.mjs [--live]                           # 162 assertions, 3 live probes
+node tests/fidelity.mjs [--live]                           # 174 assertions, 3 live probes
 ```
 
 **Four checks over already-fetched payloads, plus two that read the draft's sources.** The suite
@@ -486,6 +486,45 @@ institutional web pages are checkable; some publishers block automated fetches, 
 work is unavailable by definition.
 
 Three things this had to get right, each found by running it on real DOIs:
+
+**Two OpenAlex limits were being violated, and one of them was silent.** OpenAlex caps `|` (OR) at
+**100 values per filter** and `per_page` at **100**. The screen joined every DOI into one URL and
+paged at 50, so: more than 100 DOIs failed the whole request, and **more than 50 DOIs came back
+truncated — the extra DOIs carried no retraction flag and looked clean.** A screen that quietly
+covers half its input is worse than no screen, so DOIs are now chunked at the OR limit with
+`per_page` set to match, and duplicates collapse first.
+
+**What OpenAlex actually costs, measured rather than assumed** (`meta.cost_usd` on live calls):
+
+| call | cost |
+|---|---|
+| single entity by DOI (`/works/doi:…`) | **free** — no cost field at all |
+| list + filter (`?filter=doi:a|b|…`), 1 or 100 DOIs | $0.0001 |
+| full-text **search** (`?search=…`) | $0.001 — 10× a list call |
+
+So batching does not save money on lookups — they are already free. It saves *requests* (10/s
+keyless), which is why the screen batches and the resolver does not need to. The real budget driver
+is **search**, at a cent per thousand.
+
+**Keyless means $0.10/day shared across everything on your network's IP.** OpenAlex states this in
+its own `200` response, along with the correction to a widely repeated belief: *"the mailto parameter
+doesn't raise this limit."* A free key (`openalex.org/settings/api`) gives **$1/day, per account**,
+and raises the per-second limit from 10 to 30. Set it once:
+
+```bash
+export CITEKIT_OPENALEX_KEY=...        # or OPENALEX_API_KEY; reuses the app's own setting name
+```
+
+A 429 now says which of those it is and what to do, rather than surfacing `HTTP 429`. On the tooling
+side the mitigations are caching, not batching: work metadata is cached for 7 days under
+`~/.cache/citekit/src/oa/`, and fetched source text under `~/.cache/citekit/src/`, so a repeat run
+does no network work at all.
+
+| Run | Network |
+|---|---|
+| first pass over a document | one lookup per DOI-cited quotation |
+| second pass | none — OA metadata and source text both come from cache |
+| a run where every citation resolves through `--map` | none at all — no OpenAlex call is made |
 
 **`best_oa_location` is not authoritative.** For `10.48550/arXiv.1706.03762` (Attention Is All You
 Need) OpenAlex returns the correct title but a `best_oa_location` pointing at an unrelated preprint

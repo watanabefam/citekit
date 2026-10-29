@@ -1118,12 +1118,28 @@ export function mapLookup(map, label) {
   return null;
 }
 
-async function openAlexOaUrls(doi, fetchImpl = fetch) {
+async function openAlexOaUrls(doi, fetchImpl = fetch, cacheRoot = pdfCacheDir()) {
+  const fs = await import('node:fs');
+  const crypto = await import('node:crypto');
+  const cacheDir = `${cacheRoot}/oa`;
+  const cacheFile = `${cacheDir}/${crypto.createHash('sha1').update(String(doi)).digest('hex').slice(0, 16)}.json`;
+  const TTL_MS = 7 * 24 * 3600 * 1000;
+  // A work's OA locations rarely change, and this lookup sits behind every DOI-cited quotation.
+  // Caching it removes a round trip per quote on repeat runs — the call is free either way, but
+  // free is not the same as instant.
+  try {
+    const hit = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+    if (hit && Date.now() - hit.at < TTL_MS && Array.isArray(hit.urls)) {
+      return { urls: hit.urls, title: hit.title || '', status: hit.status, cached: true };
+    }
+  } catch { /* cache miss */ }
+
   const url = `https://api.openalex.org/works/doi:${encodeURIComponent(doi)}`
-    + '?select=doi,title,open_access,best_oa_location,locations';
+    + '?select=doi,title,open_access,best_oa_location,locations' + openAlexKeyParam();
+  let out;
   try {
     const res = await fetchImpl(url, { headers: { Accept: 'application/json' } });
-    if (!res.ok) return { urls: [], reason: `OpenAlex HTTP ${res.status}` };
+    if (!res.ok) return { urls: [], reason: openAlexError(res.status, url).message };
     const d = await res.json();
     const urls = [];
     const push = u => { if (u && !urls.includes(u)) urls.push(u); };
@@ -1135,8 +1151,14 @@ async function openAlexOaUrls(doi, fetchImpl = fetch) {
     const best = d?.best_oa_location;
     if (best?.is_oa) push(best.pdf_url), push(best.landing_page_url);
     for (const l of d?.locations || []) if (l?.is_oa) { push(l.pdf_url); push(l.landing_page_url); }
-    return { urls, title: d?.title || '', status: d?.open_access?.oa_status };
-  } catch (e) { return { urls: [], reason: e.message.slice(0, 60) }; }
+    out = { urls, title: d?.title || '', status: d?.open_access?.oa_status };
+  } catch (e) { return { urls: [], reason: e.message.slice(0, 90) }; }
+
+  try {
+    fs.mkdirSync(cacheDir, { recursive: true });
+    fs.writeFileSync(cacheFile, JSON.stringify({ ...out, at: Date.now() }));
+  } catch { /* best-effort */ }
+  return out;
 }
 
 // Does this fetched text actually belong to the cited work? Without this check a wrong-but-fetchable
@@ -1186,7 +1208,7 @@ export async function quotesOnline(markdown, {
       } else if (near.kind === 'url') {
         candidates.push({ url: near.value, how: 'url' });
       } else if (near.kind === 'doi' && online) {
-        const oa = await openAlexOaUrls(near.value, fetchImpl);
+        const oa = await openAlexOaUrls(near.value, fetchImpl, cacheDir);
         if (!oa.urls.length) {
           notes.push(`${near.value}: ${oa.reason || (oa.status === 'closed' ? 'closed access' : 'no open-access copy')}`);
           continue;
@@ -1286,7 +1308,7 @@ async function getJSON(url, timeoutMs = 20000, headers = {}) {
   try {
     const res = await fetch(url, { signal: ctl.signal, headers: { Accept: 'application/json', ...headers } });
     if (res.status === 404) return null;
-    if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+    if (!res.ok) throw (/api\.openalex\.org/.test(url) ? openAlexError(res.status, url) : new Error(`HTTP ${res.status} for ${url}`));
     return await res.json();
   } finally { clearTimeout(timer); }
 }
@@ -1325,11 +1347,29 @@ export async function checkDoi(doi) {
    back in ONE call at cost_usd 0.0001. Screening a 20-result search therefore costs one metered
    call, not twenty. Screen cheap, then fetch Crossref detail only for the flagged ones.
    URL builder and response mapper are split out as pure functions so they test without network. */
-export function screenUrl(dois, perPage = 50) {
+export function screenUrl(dois, perPage = 100) {
   const list = (Array.isArray(dois) ? dois : [dois]).map(strip).filter(Boolean);
   if (!list.length) return null;
   return 'https://api.openalex.org/works?filter=doi:' + list.map(encodeURIComponent).join('|')
-    + '&select=doi,type,is_retracted&per-page=' + perPage;
+    + '&select=doi,type,is_retracted&per-page=' + perPage + openAlexKeyParam();
+}
+
+// OpenAlex caps OR at 100 values per filter and per_page at 100. Both limits were being violated:
+// more than 100 DOIs made the whole request fail, and per-page=50 silently truncated the response,
+// so DOIs beyond the fiftieth came back with no retraction flag and looked clean. A screen that
+// quietly covers half its input is worse than no screen. Chunk at the OR limit and page at the
+// same size, so every DOI in a chunk is guaranteed to be returned.
+export const OPENALEX_OR_MAX = 100;
+
+export function screenUrls(dois) {
+  const list = (Array.isArray(dois) ? dois : [dois]).map(strip).filter(Boolean);
+  if (!list.length) return [];
+  const uniq = [...new Set(list)];
+  const urls = [];
+  for (let i = 0; i < uniq.length; i += OPENALEX_OR_MAX) {
+    urls.push(screenUrl(uniq.slice(i, i + OPENALEX_OR_MAX), OPENALEX_OR_MAX));
+  }
+  return urls;
 }
 
 export function mapScreenResponse(json = {}) {
@@ -1343,13 +1383,42 @@ export function mapScreenResponse(json = {}) {
 }
 
 export async function screenDois(dois) {
-  const url = screenUrl(dois);
-  if (!url) return new Map();
-  const json = await getJSON(url);
-  return json ? mapScreenResponse(json) : new Map();
+  const urls = screenUrls(dois);
+  if (!urls.length) return new Map();
+  const merged = new Map();
+  for (const u of urls) {
+    const json = await getJSON(u);
+    if (json) for (const [k, v] of mapScreenResponse(json)) merged.set(k, v);
+  }
+  return merged;
 }
 
-// Reuse CiteKit's own normaliser so this tool cannot drift from the app.
+// An optional OpenAlex key, reusing the name the app already uses for the same setting.
+// Keyless is a $0.10/day budget SHARED across everything on the network's IP (the mailto parameter
+// does not raise it — OpenAlex says so in its own 200 notice); a free key is $1/day per account and
+// raises the per-second limit from 10 to 30. Measured cost per call: single entity by DOI is FREE,
+// list+filter is $0.0001, full-text search is $0.001 — so caching and doing fewer searches matter
+// far more than batching lookups, which are already free.
+export function openAlexKey() {
+  return process.env.CITEKIT_OPENALEX_KEY || process.env.OPENALEX_API_KEY || '';
+}
+
+export function openAlexKeyParam() {
+  const k = openAlexKey();
+  return k ? '&api_key=' + encodeURIComponent(k) : '';
+}
+
+// Every "budget exhausted" looks identical to "nothing found" from the caller's side, so name the
+// actual cause and the actual fix.
+export function openAlexError(status, url) {
+  if (status === 429) {
+    return new Error(openAlexKey()
+      ? `OpenAlex rate/budget limit (HTTP 429) — your key's daily budget is spent; resets midnight UTC`
+      : `OpenAlex budget exhausted (HTTP 429) — keyless requests share $0.10/day across this IP. `
+        + `A free key gives $1/day: set CITEKIT_OPENALEX_KEY. Resets midnight UTC`);
+  }
+  return new Error(`HTTP ${status} for ${url}`);
+}
 let _LL = null;
 function oaToRecord(w) {
   try {

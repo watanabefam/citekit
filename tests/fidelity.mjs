@@ -15,7 +15,7 @@ import {
   similarity, reconcile, RECONCILE, encodeCompact, decodeRecord, ledgerToMarkdown,
   normaliseQuote, extractQuotes, verifyQuote, quoteReport, citationSymmetry,
   quotesOnline, stripHtml, citationLabelIn, citationLabelsIn, mapLookup, titleMatches,
-  readSourceIndex, findPassages,
+  readSourceIndex, findPassages, screenUrls, openAlexKey, openAlexError,
 } from '../tools/fidelity.mjs';
 
 let pass = 0, fail = 0;
@@ -615,7 +615,9 @@ section('15. online resolution (mocked fetch, no network)');
     if (url.includes('right.example')) return new Response(RIGHT, { status: 200, headers: { 'content-type': 'text/html' } });
     return new Response('nope', { status: 404 });
   };
-  const tmp = (await import('node:fs')).mkdtempSync(`${(await import('node:os')).tmpdir()}/ck-`);
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const tmp = fs.mkdtempSync(`${os.tmpdir()}/ck-`);
   const doc = `The paper states "${QUOTE}" (10.1234/test.2020).`;
 
   const good = await quotesOnline(doc, { fetchImpl: mock, cacheDir: tmp });
@@ -634,7 +636,10 @@ section('15. online resolution (mocked fetch, no network)');
         ? new Response(WRONG, { status: 200, headers: { 'content-type': 'text/html' } })
         : new Response('nope', { status: 404 }));
 
-  const bad = await quotesOnline(doc, { fetchImpl: onlyWrong, cacheDir: tmp });
+  // Fresh cache dir: the OA lookup cache is keyed by DOI, so reusing one would serve the previous
+  // scenario's answer and the test would pass or fail for the wrong reason.
+  const tmp2 = fs.mkdtempSync(`${os.tmpdir()}/ck-oa2-`);
+  const bad = await quotesOnline(doc, { fetchImpl: onlyWrong, cacheDir: tmp2 });
   ok(bad.notFound.length === 0 && bad.unverifiable.length === 1,
     'THE SAFETY PROPERTY: a wrong copy yields "unverifiable", never "not found"');
   ok(/title/i.test(bad.unverifiable[0].why || ''), 'the reason names the title mismatch');
@@ -644,7 +649,8 @@ section('15. online resolution (mocked fetch, no network)');
     ? new Response(JSON.stringify({ title: 'X', open_access: { oa_status: 'closed' }, locations: [] }),
         { status: 200, headers: { 'content-type': 'application/json' } })
     : new Response('nope', { status: 404 });
-  const cl = await quotesOnline(doc, { fetchImpl: closed, cacheDir: tmp });
+  const tmp3 = fs.mkdtempSync(`${os.tmpdir()}/ck-oa3-`);
+  const cl = await quotesOnline(doc, { fetchImpl: closed, cacheDir: tmp3 });
   ok(cl.unverifiable.length === 1 && /closed/.test(cl.unverifiable[0].why),
     'closed access is reported as unverifiable with its reason');
 
@@ -712,6 +718,59 @@ section('16. cached sources and passage retrieval');
 
   const capped = await findPassages(dir, '', '.', { max: 2 });
   ok(capped.length === 2, '--max bounds the output so it cannot become the whole document');
+}
+
+section('17. OpenAlex budget, batching and caching');
+
+{
+  // OpenAlex caps OR at 100 values and per_page at 100. Both were violated: >100 DOIs failed the
+  // whole request, and per-page=50 silently truncated, so DOIs past the fiftieth looked clean.
+  const many = Array.from({ length: 150 }, (_, i) => `10.1000/d${i}`);
+  const urls = screenUrls(many);
+  ok(urls.length === 2, 'a 150-DOI screen is split into two requests', `got ${urls.length}`);
+  ok(urls[0].split('|').length === 100, 'the first chunk carries exactly the OR limit');
+  ok(/per-page=100/.test(urls[0]), 'per_page matches the chunk size, so nothing is truncated');
+
+  const dupe = screenUrls(['10.1000/a', '10.1000/a', '10.1000/a']);
+  ok(dupe.length === 1 && dupe[0].split('|').length === 1, 'duplicate DOIs are collapsed before batching');
+  ok(screenUrls([]).length === 0, 'no DOIs means no request at all');
+
+  // Key support: keyless is $0.10/day shared across the IP; a free key is $1/day and 30 rps.
+  const before = process.env.CITEKIT_OPENALEX_KEY;
+  process.env.CITEKIT_OPENALEX_KEY = 'k-test-123';
+  ok(/api_key=k-test-123/.test(screenUrl(['10.1000/x'])), 'the key is sent when one is configured');
+  ok(openAlexKey() === 'k-test-123', 'the key is read from the environment');
+  delete process.env.CITEKIT_OPENALEX_KEY;
+  ok(!/api_key=/.test(screenUrl(['10.1000/x'])), 'no key, no api_key parameter');
+  if (before !== undefined) process.env.CITEKIT_OPENALEX_KEY = before;
+
+  ok(/budget exhausted/.test(openAlexError(429, 'u').message)
+    && /CITEKIT_OPENALEX_KEY/.test(openAlexError(429, 'u').message),
+    'a 429 names the cause and the fix instead of saying "HTTP 429"');
+  ok(!/budget/.test(openAlexError(500, 'u').message), 'a non-429 error is not misdescribed as budget');
+
+  // The OA lookup cache: second call must not re-fetch.
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const cdir = fs.mkdtempSync(`${os.tmpdir()}/ck-oa-`);
+  let calls = 0;
+  const counting = async (url) => {
+    if (url.includes('api.openalex.org')) {
+      calls++;
+      return new Response(JSON.stringify({
+        title: 'Cached Work', open_access: { oa_status: 'gold' },
+        best_oa_location: { is_oa: true, pdf_url: 'https://c.example/p' }, locations: [],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('the cached work says something quotable here for the test', { status: 200, headers: { 'content-type': 'text/html' } });
+  };
+  const doc = `It says "something quotable here for the test" (10.9999/cache.me).`;
+  await quotesOnline(doc, { fetchImpl: counting, cacheDir: cdir });
+  const afterFirst = calls;
+  await quotesOnline(doc, { fetchImpl: counting, cacheDir: cdir });
+  ok(afterFirst === 1, 'the OA lookup is made once', `calls=${afterFirst}`);
+  ok(calls === afterFirst, 'a second run is served from the OA cache', `calls=${calls}`);
+  fs.rmSync(cdir, { recursive: true, force: true });
 }
 
 section('8. citation contexts (pure)');
