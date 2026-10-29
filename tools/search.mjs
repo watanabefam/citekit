@@ -300,7 +300,7 @@ async function main() {
     const dois = [...new Set(all.map(r => String(r.doi).toLowerCase()))];
     if (dois.length) {
       try {
-        const { hits, errors } = await critiqueDois(dois);
+        const { hits, errors, checked, requested } = await critiqueDois(dois);
         let withComments = 0;
         for (const r of all) {
           const c = hits.get(String(r.doi || '').toLowerCase());
@@ -308,7 +308,7 @@ async function main() {
           r.critique = c;
           withComments++;
         }
-        out.critique = { dois: dois.length, withComments, errors };
+        out.critique = { dois: dois.length, withComments, errors, checked, requested };
         if (withComments) {
           process.stderr.write(`\n\u26a0 ${withComments} record(s) carry PubPeer comments `
             + `(not retracted — criticised):\n`);
@@ -350,9 +350,13 @@ export function toMarkdown(out) {
       + `clean result here is unconfirmed, not clear.`);
   }
   if (out.critique) {
-    lines.push('', `_critique: PubPeer checked ${out.critique.dois} DOI(s), ${out.critique.withComments} `
-      + `with comments${out.critique.errors?.length ? ' \u00b7 ' + out.critique.errors.join(' | ') : ''} `
-      + `\u2014 criticism is not retraction_`);
+    const c = out.critique;
+    const partial = typeof c.checked === 'number' && typeof c.requested === 'number' && c.checked < c.requested
+      ? ` — **PARTIAL: ${c.checked} of ${c.requested} DOI(s) checked, so "no comments" is unknown for the rest**`
+      : '';
+    lines.push('', `_critique: PubPeer checked ${c.checked ?? c.dois} of ${c.requested ?? c.dois} DOI(s), `
+      + `${c.withComments} with comments${c.errors?.length ? ' \u00b7 ' + c.errors.join(' | ') : ''}`
+      + ` \u2014 criticism is not retraction${partial}_`);
   }
   for (const [query, res] of Object.entries(out.queries)) {
     const since = res.newSince

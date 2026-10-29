@@ -1415,6 +1415,7 @@ export async function critiqueDois(dois, { fetchImpl = fetch } = {}) {
   const hits = new Map();
   const errors = [];
   if (!list.length) return { hits, errors, requested: 0, checked: 0 };
+  let checked = 0;
   for (let i = 0; i < list.length; i += PUBPEER_CHUNK) {
     const chunk = list.slice(i, i + PUBPEER_CHUNK);
     try {
@@ -1425,9 +1426,13 @@ export async function critiqueDois(dois, { fetchImpl = fetch } = {}) {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       for (const [k, v] of mapCritiqueResponse(await res.json())) hits.set(k, v);
+      // Only a chunk that actually answered counts as checked. Returning list.length here made a
+      // failed batch invisible: every DOI was reported covered while one quarter of them were never
+      // looked at. Same defect as a truncated page of results, and the same fix — count what answered.
+      checked += chunk.length;
     } catch (e) { errors.push(`PubPeer: ${e.message.slice(0, 70)}`); }
   }
-  return { hits, errors, requested: list.length, checked: list.length };
+  return { hits, errors, requested: list.length, checked };
 }
 
 // --- Unpaywall: the open-access location backup, and version provenance -------------------------
@@ -1497,6 +1502,7 @@ export async function crossrefRetractionFallback(dois, {
   const hits = new Map();
   const errors = [];
   let last = 0;
+  let checked = 0;
   for (const doi of capped) {
     const wait = intervalMs - (Date.now() - last);
     if (wait > 0) await new Promise(r => setTimeout(r, wait));
@@ -1510,9 +1516,12 @@ export async function crossrefRetractionFallback(dois, {
       const notice = items.find(i => (i['update-to'] || []).some(u => String(u.type || '').includes('retraction')))
         || items.find(i => String(i.type || '').includes('retraction'));
       if (notice) hits.set(doi.toLowerCase(), { retracted: true, notice: notice.DOI || null });
+      // A request that failed taught us nothing, so it is not "checked". Reporting capped.length
+      // here meant a run where every call 500'd still claimed full coverage of a weaker check.
+      checked++;
     } catch (e) { errors.push(`${doi}: ${e.message.slice(0, 60)}`); }
   }
-  return { hits, errors, requested: list.length, checked: capped.length };
+  return { hits, errors, requested: list.length, checked };
 }
 
 // One DOI, both registries, one verdict. OpenAlex supplies the type and the is_retracted flag;

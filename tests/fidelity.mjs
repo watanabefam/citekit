@@ -16,7 +16,7 @@ import {
   normaliseQuote, extractQuotes, verifyQuote, quoteReport, citationSymmetry,
   quotesOnline, stripHtml, citationLabelIn, citationLabelsIn, mapLookup, titleMatches,
   readSourceIndex, findPassages, screenUrls, openAlexKey, openAlexError, oaWorkUrl,
-  mapCritiqueResponse, critiqueDois, unpaywallDoi, dataciteDoi, crossrefRetractionFallback,
+  mapCritiqueResponse, critiqueDois, unpaywallDoi, dataciteDoi, crossrefRetractionFallback, redactUrl,
 } from '../tools/fidelity.mjs';
 
 let pass = 0, fail = 0;
@@ -839,6 +839,21 @@ section('18. critique, datasets, and the open-access backup');
   ok(ppBad.hits.size === 0 && ppBad.errors.length === 1,
     'a PubPeer failure is reported, not thrown — critique must not break a search');
 
+  // A chunk that failed was NOT checked, so it must not be counted as checked. Over-reporting
+  // coverage is the same defect as OpenAlex's silent per-page truncation: the number looks like
+  // reassurance.
+  let callNo = 0;
+  const flaky = async (url, opts) => {
+    callNo++;
+    if (callNo === 2) return new Response('boom', { status: 500 });
+    return jsonRes({ feedbacks: [] });
+  };
+  const partial = await critiqueDois(Array.from({ length: 120 }, (_, i) => `10.1/q${i}`), { fetchImpl: flaky });
+  ok(partial.requested === 120 && partial.requested - partial.checked === 50,
+    'the failed 50-DOI chunk is excluded from the checked count',
+    `requested=${partial.requested} checked=${partial.checked} (120 = 50+50+20, the middle 50 failed)`);
+  ok(partial.checked !== partial.requested, 'checked never silently equals requested after a failure');
+
   // --- Unpaywall ---
   delete process.env.CITEKIT_UNPAYWALL_EMAIL;
   const noEmail = await unpaywallDoi('10.1/x', { cacheRoot: cdir });
@@ -889,7 +904,49 @@ section('18. critique, datasets, and the open-access backup');
   ok(capped.checked === 2 && capped.requested === 5,
     'the fallback caps how many DOIs it will attempt, and says so in the counts');
 
+  // Crossref allows 3 requests per second, measured off `x-rate-limit-limit: 3`. Pacing is a civic
+  // obligation, not a nicety, and nothing else in this suite would notice its removal.
+  const t0 = Date.now();
+  await crossrefRetractionFallback(['10.1/p', '10.1/q', '10.1/r'], { fetchImpl: crMock, intervalMs: 80 });
+  const elapsed = Date.now() - t0;
+  ok(elapsed >= 150, 'the Crossref fallback paces itself at the requested interval', `${elapsed}ms for 3 DOIs`);
+
+  // Same over-report as PubPeer had: a 500 taught us nothing about that DOI, so it is not "checked".
+  const flakyCr = async (url) => (url.includes('bad')
+    ? new Response('x', { status: 500 })
+    : jsonRes({ message: { items: [] } }));
+  const fbPartial = await crossrefRetractionFallback(['10.1/bad', '10.1/good'], { fetchImpl: flakyCr, intervalMs: 0 });
+  ok(fbPartial.checked === 1 && fbPartial.requested === 2,
+    'a failed Crossref request is not counted as checked',
+    `checked=${fbPartial.checked} of ${fbPartial.requested}`);
+
   fs.rmSync(cdir, { recursive: true, force: true });
+}
+
+section('19. credentials never reach an error message');
+
+{
+  // Found by forcing a 401 and watching the banner print api_key verbatim. A regression here would
+  // not fail anything else in this suite, so it needs its own test.
+  const keyed = 'https://api.openalex.org/works?filter=doi:10.1/x&api_key=sk-SECRET-123&per-page=100';
+  ok(!redactUrl(keyed).includes('sk-SECRET-123'), 'redactUrl strips api_key from a URL');
+  ok(redactUrl(keyed).includes('api_key=REDACTED'), 'and marks where it was removed');
+  ok(redactUrl(keyed).includes('filter=doi:10.1/x'), 'without damaging the rest of the URL');
+
+  const mailed = 'https://api.unpaywall.org/v2/10.1/x?email=tim@example.org';
+  ok(!redactUrl(mailed).includes('tim@example.org'), 'redactUrl strips an email address too');
+
+  ok(redactUrl('https://api.crossref.org/works/10.1/x') === 'https://api.crossref.org/works/10.1/x',
+    'a URL with no credentials is returned unchanged');
+
+  const e401 = openAlexError(401, keyed);
+  ok(!e401.message.includes('sk-SECRET-123'),
+    'THE ACTUAL BUG: a 401 message must not echo the key it is complaining about');
+  ok(/check|CITEKIT_OPENALEX_KEY/i.test(e401.message), 'and says what to do about it instead');
+
+  const e429 = openAlexError(429, keyed);
+  ok(!e429.message.includes('sk-SECRET-123'), 'a 429 message redacts the key as well');
+  ok(/budget|429/i.test(e429.message), 'and names the real cause, not a generic HTTP error');
 }
 
 section('8. citation contexts (pure)');

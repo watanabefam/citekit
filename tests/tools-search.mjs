@@ -12,7 +12,20 @@ const CLI = path.join(ROOT, 'tools', 'search.mjs');
 const run = (args) => execFileSync('node', [CLI, ...args], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 
 let pass = 0, fail = 0;
-const ok = (name, cond, extra = '') => { cond ? (pass++, console.log('  ✓ ' + name + (extra ? ' — ' + extra : ''))) : (fail++, console.log('  ✗ ' + name + ' — ' + extra)); };
+// Both argument orders exist in this repo: fidelity's suite uses ok(cond, name), this one uses
+// ok(name, cond). That split already produced five assertions that were testing the truthiness of a
+// string — i.e. assertions that could never fail. Accept either order, and REFUSE a condition that
+// is not a real boolean, so the failure mode is impossible rather than merely unlikely.
+const ok = (a, b, extra = '') => {
+  let name, cond;
+  if (typeof a === 'boolean') { name = String(b); cond = a; } else { name = a; cond = b; }
+  if (typeof cond !== 'boolean') {
+    fail++;
+    console.log(`  ✗ ${name} — ASSERTION BUG: condition is ${typeof cond}, not boolean`);
+    return;
+  }
+  cond ? (pass++, console.log('  ✓ ' + name + (extra ? ' — ' + extra : ''))) : (fail++, console.log('  ✗ ' + name + ' — ' + extra));
+};
 
 console.log('\n1. --help / --list-sources (no network, no keys)');
 const help = run(['--help']);
@@ -79,6 +92,20 @@ ok('a degraded retraction screen says it is weaker, not clear',
 ok('the degraded banner reports coverage and the known Crossref blind spot',
    /2 of 3 DOI/.test(degradedMd) && /10\.1378\/chest\.128\.6\.3817/.test(degradedMd));
 
+// The original silent-screen bug: stderr warned, markdown said nothing, so an agent read "no
+// retraction warnings" as "no retractions". The banner is the fix and needs its own assertion.
+const noScreenMd = toMarkdown({
+  generated: 'now', per: 1, sources: ['openalex'],
+  screenFailed: { reason: 'HTTP 429', dois: 4 },
+  queries: { q: { count: 0, errors: [], records: [] } },
+});
+ok('a screen that did not run says it did not run, in the markdown',
+   /RETRACTION SCREEN DID NOT RUN/.test(noScreenMd) && /were NOT checked/.test(noScreenMd));
+ok('and explicitly warns that absence of a warning means nothing',
+   /absence of a warning below means/.test(noScreenMd));
+ok('DEGRADED and DID NOT RUN are different sentences',
+   !/DEGRADED/.test(noScreenMd));
+
 const critMd = toMarkdown({
   generated: 'now', per: 1, sources: ['openalex'],
   critique: { dois: 2, withComments: 1, errors: [] },
@@ -103,6 +130,21 @@ const noBaseMd = toMarkdown({ generated: 'now', per: 1, sources: ['openalex'],
     newSince: { baselineKnown: false, baselineAt: null, count: 1 } } } });
 ok('with no previous run --since says so instead of implying change',
    /no previous run to compare against/.test(noBaseMd));
+
+// A critique screen that only reached part of the DOI list must not report "no comments" as if it
+// had covered them all.
+const partialMd = toMarkdown({
+  generated: 'now', per: 1, sources: ['openalex'],
+  critique: { dois: 3, withComments: 0, errors: ['PubPeer: HTTP 500'], checked: 2, requested: 3 },
+  queries: { q: { count: 0, errors: [], records: [] } },
+});
+ok('a partially-checked critique screen says PARTIAL', /PARTIAL: 2 of 3/.test(partialMd));
+const fullMd = toMarkdown({
+  generated: 'now', per: 1, sources: ['openalex'],
+  critique: { dois: 3, withComments: 0, errors: [], checked: 3, requested: 3 },
+  queries: { q: { count: 0, errors: [], records: [] } },
+});
+ok('a fully-checked critique screen does not cry PARTIAL', !/PARTIAL/.test(fullMd) && /checked 3 of 3/.test(fullMd));
 
 // Result cache: discovery is cached, retraction status is not.
 const cacheDir = fs.mkdtempSync(`${os.tmpdir()}/ck-cache-`);

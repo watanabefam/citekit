@@ -20,7 +20,7 @@ Tick **dry run** first if you want to see the exact prompt before spending token
 `node tests/verify.mjs` runs 95 behavioural assertions against live APIs and fake SSE providers.
 `tests/browser.mjs` (44 assertions) drives real Chromium; `tests/proxy-integration.mjs` (16) verifies
 the optional Cloudflare Worker against the real workerd runtime; `tests/mcp-server.mjs` (19) speaks
-the MCP protocol over stdio to the real server. `tests/tools-search.mjs` (24) covers the CLI, and
+the MCP protocol over stdio to the real server. `tests/tools-search.mjs` (29) covers the CLI, and
 `tests/fidelity.mjs` (55, plus 3 live probes) covers the citation-integrity checks.
 
 ---
@@ -350,7 +350,7 @@ node tools/fidelity.mjs quotes FILE.md --online            # verify quotations a
 node tools/fidelity.mjs refs FILE.md                       # orphan citations, uncited references
 node tools/fidelity.mjs sources                            # cached sources + their token cost
 node tools/fidelity.mjs passage URL --grep "phrase"        # one passage, not the whole paper
-node tests/fidelity.mjs [--live]                           # 196 assertions, 3 live probes
+node tests/fidelity.mjs [--live]                           # 209 assertions, 3 live probes
 ```
 
 **Four checks over already-fetched payloads, plus two that read the draft's sources.** The suite
@@ -591,13 +591,19 @@ the set reports that. Batched by DOI (probed: 60 DOIs in one POST returns `200`)
 call per run:
 
 ```
-_critique: PubPeer checked 3 DOI(s), 1 with comments — criticism is not retraction_
+_critique: PubPeer checked 3 of 3 DOI(s), 1 with comments — criticism is not retraction_
 **⚠ 17 PubPeer comment(s)** — criticised, not retracted — https://pubpeer.com/publications/B5B9…
 ```
 
 Never cached, and never written into the result cache — comments accumulate while a DOI stays fixed.
 `--no-critique` skips it. PubPeer has no public API yet (its FAQ says one is coming), so this uses
 the devkey Zotero and `metacheck` use and is best-effort by construction.
+
+**A partial check says it is partial.** A batch that fails is *not* counted as checked — the
+coverage line reports `checked of requested`, and a shortfall prints `PARTIAL`. The first version
+returned `list.length` regardless, so a run where a quarter of the DOIs 500'd reported complete
+coverage of a check that had not happened. The same bug was in the Crossref fallback, and both were
+found by reading the return values rather than by any failing test.
 
 **A degraded retraction screen declares itself.** If OpenAlex fails, Crossref stands in — but
 Crossref is incomplete: measured, `filter=updates:` returns **0** notices for
