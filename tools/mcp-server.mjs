@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// CiteKit MCP server — the nine-source search pipeline, deterministic ranking and
-// citation-graph walking, exposed to any MCP client over stdio.
+// CiteKit MCP server — the ten-source scholarly search pipeline, separate ClinicalTrials.gov
+// registry lane, deterministic ranking and citation-graph walking, exposed over stdio.
 //
 // Zero dependencies, deliberately: the repo has none and this adds none. It is a thin
 // adapter over the same `loadLL()` loader tools/search.mjs uses, so the MCP server runs
@@ -11,11 +11,15 @@
 //   Newline-delimited JSON-RPC 2.0 on stdin/stdout. Diagnostics go to stderr; stdout
 //   carries protocol messages only, because anything else corrupts the transport.
 //
-// Config — all optional. Five of the nine sources need neither a key nor a budget:
+// Config — all optional. Six of the ten scholarly sources need neither a key nor a budget;
+// OpenAIRE and ClinicalTrials.gov need neither a key nor a proxy.
 //   CITEKIT_OPENALEX_KEY   raises OpenAlex from $0.10/day to $1/day (recommended)
 //   CITEKIT_S2_KEY         Semantic Scholar, lifts the shared-pool 429
 //   CITEKIT_CORE_KEY       CORE
 //   TAVILY_API_KEY / CITEKIT_TAVILY_KEY, or ~/.config/citekit/tavily.key
+// Every key is read from the environment first, then from a 0600 file at
+// ~/.config/citekit/<name>.key — outside the repo, so a key can never be committed.
+// Override the file path with CITEKIT_<NAME>_KEY_FILE (e.g. CITEKIT_S2_KEY_FILE).
 //
 // Usage:  node tools/mcp-server.mjs        (a client normally spawns this itself)
 import fs from 'node:fs';
@@ -26,22 +30,32 @@ import { loadLL } from './load-ll.mjs';
 
 const PROTOCOL_VERSION = '2025-06-18';
 const KEYLESS = ['openalex', 'crossref', 'epmc', 'pubmed', 'eric', 'doaj'];
-const OPT_IN = ['s2', 'arxiv', 'core'];
+const OPT_IN = ['s2', 'arxiv', 'core', 'openaire', 'clinicaltrials'];
 
 const LL = await loadLL();
 // Same env -> settings channel the CLI uses. Only overrides what was actually supplied.
-if (process.env.CITEKIT_OPENALEX_KEY) LL.S.openalexKey = process.env.CITEKIT_OPENALEX_KEY;
-if (process.env.CITEKIT_S2_KEY) LL.S.s2Key = process.env.CITEKIT_S2_KEY;
-if (process.env.CITEKIT_CORE_KEY) LL.S.coreKey = process.env.CITEKIT_CORE_KEY;
-// Tavily is optional. Absent, the shipping adapter uses its keyless mode.
-// OpenCode rewrites its MCP config and can drop an inline `environment` block, so a
-// 0600 key file outside the repo is the persistent fallback. Environment still wins.
-const tavilyKeyFile = process.env.CITEKIT_TAVILY_KEY_FILE ||
-  path.join(os.homedir(), '.config', 'citekit', 'tavily.key');
-let tavilyKey = (process.env.CITEKIT_TAVILY_KEY || process.env.TAVILY_API_KEY || '').trim();
-if (!tavilyKey) {
-  try { tavilyKey = fs.readFileSync(tavilyKeyFile, 'utf8').trim(); } catch { /* keyless */ }
+//
+// Key custody: MCP clients rewrite their own config and can drop an inline `environment`
+// block, so every key keeps a 0600 file fallback at ~/.config/citekit/<name>.key. The file
+// lives outside this repo deliberately — nothing here may make a key committable.
+// Environment still wins, so an ephemeral CI key never has to touch the disk.
+const keyDir = path.join(os.homedir(), '.config', 'citekit');
+function keyFor(name, envNames) {
+  for (const n of envNames) {
+    const v = (process.env[n] || '').trim();
+    if (v) return v;
+  }
+  const override = process.env[`CITEKIT_${name.toUpperCase()}_KEY_FILE`];
+  try { return fs.readFileSync(override || path.join(keyDir, `${name}.key`), 'utf8').trim(); } catch { return ''; }
 }
+const openalexKey = keyFor('openalex', ['CITEKIT_OPENALEX_KEY']);
+if (openalexKey) LL.S.openalexKey = openalexKey;
+const s2Key = keyFor('s2', ['CITEKIT_S2_KEY']);
+if (s2Key) LL.S.s2Key = s2Key;
+const coreKey = keyFor('core', ['CITEKIT_CORE_KEY']);
+if (coreKey) LL.S.coreKey = coreKey;
+// Tavily is optional. Absent, the shipping adapter uses its keyless mode.
+const tavilyKey = keyFor('tavily', ['CITEKIT_TAVILY_KEY', 'TAVILY_API_KEY']);
 if (tavilyKey) LL.S.tavilyKey = tavilyKey;
 
 const REGISTRY = {
@@ -54,6 +68,8 @@ const REGISTRY = {
   s2: (q, o) => LL.searchS2(q, o),
   arxiv: (q, o) => LL.searchArxiv(q, o),
   core: (q, o) => LL.searchCORE(q, o),
+  openaire: (q, o) => LL.searchOpenAIRE(q, o),
+  clinicaltrials: (q, o) => LL.searchClinicalTrials(q, o),
 };
 
 /* Keep `id` and `doi` — the citation walker needs them to seed. Dropping either turns a
@@ -63,8 +79,15 @@ const trim = r => ({
   venue: r.venue || '', doi: r.doi || '', oa: !!r.oa, oaStatus: r.oaStatus || '',
   pdf: r.pdf || '', citations: r.citations || 0, source: r.source || '',
   abstract: (r.abstract || '').slice(0, 600),
+  ...(r.peerReviewStatus ? { peerReviewStatus: r.peerReviewStatus } : {}),
+  ...(r.openAireAttribution ? { openAireAttribution: r.openAireAttribution, openAireId: r.openAireId, openAirePids: r.openAirePids } : {}),
   ...(r.via ? { via: r.via, viaSeed: r.viaSeed } : {}),
 });
+
+const trimTrial = r => ({ id: r.id, kind: 'trial', nctId: r.nctId, title: r.title,
+  abstract: (r.abstract || '').slice(0, 600), status: r.status || 'UNKNOWN',
+  studyType: r.studyType || '', phases: r.phases || [], url: r.url,
+  source: 'ClinicalTrials.gov' });
 
 /* Web records are deliberately shaped differently from paper records: no authors, DOI, or
    citation count, and an explicit `text` field so a client cannot mistake the extract for an
@@ -85,9 +108,11 @@ async function search({ query, sources = KEYLESS, per = 10, oaOnly = false, year
     if (res.status === 'fulfilled') all.push(...res.value);
     else errors.push(chosen[i] + ': ' + (res.reason?.message || res.reason));
   });
-  const clean = LL.dedupe(all).filter(r => r.title && r.title !== '(untitled)');
+  const split = LL.splitSearchRecords(all);
+  const clean = LL.dedupe(split.scholarly).filter(r => r.title && r.title !== '(untitled)');
   const ranked = LL.rankResults(query, enrich ? await LL.enrichWithOpenAlex(clean) : clean);
-  return { query, sources: chosen, errors, total: ranked.length, records: ranked.slice(0, limit).map(trim) };
+  return { query, sources: chosen, errors, total: ranked.length, records: ranked.slice(0, limit).map(trim),
+    trials: split.trials.slice(0, limit).map(trimTrial), trialTotal: split.trials.length };
 }
 
 async function searchWeb({ query, limit = 8, domains = [], timeRange = '' }) {
@@ -156,7 +181,7 @@ const TOOLS = [
   {
     name: 'search_literature',
     title: 'Search the scholarly literature',
-    description: 'Search nine scholarly databases at once (OpenAlex, Crossref, Europe PMC, PubMed, ERIC, DOAJ, CORE, Semantic Scholar, arXiv) and return records ranked deterministically — lexical relevance, citations, full-text availability and open access. Use for "what is the evidence on X", finding papers, or grounding a claim. Sources marked opt-in need a key or a CORS proxy.',
+    description: 'Search scholarly databases and optionally ClinicalTrials.gov. Scholarly papers are ranked deterministically; registered studies are returned separately in trials and are not publications or evidence of efficacy. OpenAIRE is opt-in; ClinicalTrials.gov is an opt-in registry source. Use for evidence searches and to discover relevant papers or registered studies.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -221,7 +246,7 @@ async function handle(line) {
         protocolVersion: asked === PROTOCOL_VERSION ? PROTOCOL_VERSION : PROTOCOL_VERSION,
         capabilities: { tools: {} },
         serverInfo: { name: 'citekit', title: 'CiteKit research search', version: '1.1.0' },
-        instructions: 'Search nine scholarly databases, rank deterministically, walk the citation graph one level in both directions, and search the general web with Tavily. Use search_web alongside Exa when available, or alone when Exa is rate-limited. Web records are not peer-reviewed and are labelled kind="web". Five of the nine scholarly sources need neither a key nor a budget; set CITEKIT_OPENALEX_KEY to raise the OpenAlex budget and TAVILY_API_KEY (or CITEKIT_TAVILY_KEY) to raise the web limit.',
+        instructions: 'Search scholarly databases and optionally search OpenAIRE or the ClinicalTrials.gov registry. Scholarly records are ranked deterministically; ClinicalTrials.gov records are returned separately as registered studies, not publications or evidence of efficacy. Citation expansion applies to papers. Search the general web with search_web; web records are kind="web" and not peer-reviewed.'
       });
     }
     if (method === 'ping') return reply(id, {});

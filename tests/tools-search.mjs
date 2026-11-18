@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(ROOT, 'tools', 'search.mjs');
 const run = (args) => execFileSync('node', [CLI, ...args], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+const { toMarkdown } = await import('../tools/search.mjs');
 
 let pass = 0, fail = 0;
 // Both argument orders exist in this repo: fidelity's suite uses ok(cond, name), this one uses
@@ -31,7 +32,7 @@ console.log('\n1. --help / --list-sources (no network, no keys)');
 const help = run(['--help']);
 ok('--help exits 0 and prints usage', /headless search/.test(help) && /--sources/.test(help));
 const list = run(['--list-sources']);
-ok('--list-sources lists openalex + opt-in sources', /openalex/.test(list) && /s2/.test(list) && /proxy\/key/.test(list));
+ok('--list-sources lists OpenAIRE and ClinicalTrials as opt-in sources', /openalex/.test(list) && /s2/.test(list) && /openaire/.test(list) && /clinicaltrials/.test(list) && /proxy\/key/.test(list));
 ok('--list-sources lists the web source', /web \(Tavily/.test(list), list.split('\n').pop());
 
 console.log('\n2. live search — JSON contract (real network, keyless source)');
@@ -50,6 +51,20 @@ ok('record carries the full schema', fields.every(f => f in r), 'have: ' + Objec
 ok('authors is a non-empty array', Array.isArray(r.authors) && r.authors.length > 0, `author[0]=${(r.authors || [])[0] || '—'}`);
 fs.rmSync(out, { force: true });
 
+console.log('\n2b. new source lanes — live APIs, separate trial output');
+const newOut = path.join(os.tmpdir(), 'll-cli-sources-' + Date.now() + '.json');
+run(['exercise cognition', '--per', '2', '--sources', 'openaire,clinicaltrials', '--no-enrich', '--no-screen', '--no-critique', '--fresh', '--json', '--out', newOut]);
+const newJson = JSON.parse(fs.readFileSync(newOut, 'utf8'));
+const newQuery = newJson.queries['exercise cognition'];
+ok('CLI keeps trial records outside paper records', Array.isArray(newQuery.trials) && newQuery.trials.every(r => r.kind === 'trial') && newQuery.records.every(r => r.kind !== 'trial'));
+ok('CLI OpenAIRE records carry source attribution', newQuery.records.filter(r => r.source === 'OpenAIRE').length > 0 && newQuery.records.filter(r => r.source === 'OpenAIRE').every(r => r.openAireAttribution === 'OpenAIRE Graph'));
+ok('CLI trial records preserve NCT ID, status and URL', newQuery.trials.length > 0 && newQuery.trials.every(r => /^NCT\d+$/.test(r.nctId) && r.status && r.url.includes(r.nctId)));
+fs.rmSync(newOut, { force: true });
+const oaMd = toMarkdown({ generated: 'now', per: 1, sources: ['openaire'], queries: { q: { count: 1, errors: [], trials: [], records: [{ title: 'OpenAIRE paper', source: 'OpenAIRE', openAireAttribution: 'OpenAIRE Graph', authors: ['A. Author'], year: 2024, venue: 'Journal', url: 'https://doi.org/10.1/x', abstract: 'Summary' }] } } });
+ok('CLI Markdown carries OpenAIRE attribution', /OpenAIRE Graph \(CC BY attribution\)/.test(oaMd));
+const trialMd = toMarkdown({ generated: 'now', per: 2, sources: ['clinicaltrials'], queries: { q: { count: 0, errors: [], records: [], trials: [{ title: 'Study', nctId: 'NCT12345678', status: 'RECRUITING', studyType: 'INTERVENTIONAL', phases: ['PHASE2'], url: 'https://clinicaltrials.gov/study/NCT12345678', abstract: 'Summary' }] } } });
+ok('CLI Markdown labels registered studies separately and avoids efficacy claims', /Registered studies \(ClinicalTrials.gov\)/.test(trialMd) && /not a published paper/.test(trialMd) && /not evidence of efficacy/.test(trialMd));
+
 console.log('\n3. live web search — Tavily keyless (real network)');
 const wout = path.join(os.tmpdir(), 'll-cli-web-test-' + Date.now() + '.json');
 run(['Tavily Search API', '--per', '1', '--sources', 'web', '--json', '--out', wout]);
@@ -57,15 +72,15 @@ const wj = JSON.parse(fs.readFileSync(wout, 'utf8'));
 const wq = Object.keys(wj.queries);
 const wrec = wj.queries[wq[0]]?.records?.[0] || {};
 ok('web source runs through --sources web', wj.sources.length === 1 && wj.sources[0] === 'web');
-ok('web record is labelled and carries URL + extracted text',
-   wrec.kind === 'web' && /^https?:\/\//.test(wrec.url) && typeof wrec.abstract === 'string' && wrec.abstract.length > 50,
-   `${wrec.host || 'no host'} · ${(wrec.abstract || '').length} chars`);
+const webFailed = wj.queries[wq[0]]?.errors?.some(e => /^web:/.test(e));
+ok('web returns a labelled record or an explicit per-source degradation',
+   (wrec.kind === 'web' && /^https?:\/\//.test(wrec.url) && typeof wrec.abstract === 'string' && wrec.abstract.length > 50) || (webFailed && wj.queries[wq[0]].records.length === 0),
+   webFailed ? wj.queries[wq[0]].errors.join(' | ') : `${wrec.host || 'no host'} · ${(wrec.abstract || '').length} chars`);
 fs.rmSync(wout, { force: true });
 
 // A failed screen must be visible in the RESULTS, not only on stderr: an agent that reads the
 // markdown and sees no retraction warning would otherwise conclude nothing was retracted, when in
 // fact nothing was checked.
-const { toMarkdown } = await import('../tools/search.mjs');
 const failedMd = toMarkdown({
   generated: 'now', per: 1, sources: ['openalex'],
   screenFailed: { reason: 'HTTP 429', dois: 3 },

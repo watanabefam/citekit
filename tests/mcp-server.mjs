@@ -147,6 +147,20 @@ t('search_literature returns ranked records from a keyless source', () => {
   check(p.records.every(r => 'id' in r && 'doi' in r), 'a record lost id/doi, so expand_citations could not seed from it');
 });
 
+const newSources = await call('tools/call', {
+  name: 'search_literature',
+  arguments: { query: 'exercise cognition', sources: ['openaire', 'clinicaltrials'], per: 2, limit: 3, enrich: false },
+});
+t('search_literature exposes OpenAIRE and ClinicalTrials separately', () => {
+  check(!newSources.result.isError, newSources.result.content[0].text);
+  const p = newSources.result.structuredContent;
+  check(Array.isArray(p.records) && Array.isArray(p.trials), 'paper records/trials arrays missing');
+  check(p.records.every(r => r.source === 'OpenAIRE' || r.source), 'paper result source missing');
+  check(p.records.filter(r => r.source === 'OpenAIRE').every(r => r.openAireAttribution === 'OpenAIRE Graph' && r.openAireId), 'OpenAIRE attribution/id missing');
+  check(p.trials.every(r => r.kind === 'trial' && r.nctId && r.status && r.url), 'trial identity/status/link missing');
+  check(p.records.every(r => r.kind !== 'trial'), 'trial entered scholarly records');
+});
+
 const web = await call('tools/call', {
   name: 'search_web',
   arguments: { query: 'Tavily Search API', limit: 2 },

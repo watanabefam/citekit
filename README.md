@@ -1,7 +1,7 @@
 # CiteKit
 
-A self-contained academic research workspace that runs entirely in the browser: **nine scholarly
-databases, a Tavily-backed web source, deterministic ranking, and citation-grounded answers through
+A self-contained academic research workspace that runs entirely in the browser: **ten scholarly
+databases, a separate ClinicalTrials.gov registry lane, a Tavily-backed web source, deterministic ranking, and citation-grounded answers through
 your own model key**. No backend, no build step, no account — one HTML file. Search ~300M works,
 add general web pages when you need them, ingest your own PDFs, and every claim comes back with a
 numbered citation you can click through.
@@ -17,11 +17,18 @@ browsers send no `Origin` header to `file://`, which some APIs require.)
 Then: **Settings** → pick provider → paste key → search → tick papers → *Add +* → ask questions.
 Tick **dry run** first if you want to see the exact prompt before spending tokens.
 
-`node tests/verify.mjs` runs 95 behavioural assertions against live APIs and fake SSE providers.
-`tests/browser.mjs` (44 assertions) drives real Chromium; `tests/proxy-integration.mjs` (16) verifies
-the optional Cloudflare Worker against the real workerd runtime; `tests/mcp-server.mjs` (19) speaks
-the MCP protocol over stdio to the real server. `tests/tools-search.mjs` (29) covers the CLI, and
-`tests/fidelity.mjs` (55, plus 3 live probes) covers the citation-integrity checks.
+`node tests/verify.mjs` exercises the shipping adapters against live APIs and fake SSE providers.
+`tests/browser.mjs` drives the app in real Chromium; `tests/proxy-integration.mjs` verifies the
+optional Cloudflare Worker against workerd; `tests/mcp-server.mjs` speaks the MCP protocol over
+stdio. `tests/tools-search.mjs` covers the CLI, and `tests/fidelity.mjs` covers citation integrity.
+Live-service assertions can fail when upstream APIs rate-limit or return errors; consult the test
+output for per-source degradation rather than treating a live outage as a zero-result response.
+On 2026-11-17, the headless suite's OpenAIRE/ClinicalTrials assertions passed. Keyless, it had 12
+failures from live OpenAlex quota and an older DOAJ result-count expectation; when the local OpenAlex
+and Tavily key files were supplied through the app's own settings path, it passed 118 of 119
+assertions, leaving only the DOAJ expectation (3 live results where the assertion wants 5). The test
+script itself remains keyless; this was a manual keyed verification. Browser, CLI, MCP, and proxy
+suites passed (53, 34, 20, and 16 assertions respectively); see the feature progress ledger.
 
 ---
 
@@ -32,7 +39,8 @@ model you already pay for. This is that teardown, part by part.
 
 | Capability | What the commercial tools run on | What CiteKit uses |
 |---|---|---|
-| **Semantic literature search** ("200M+ peer-reviewed papers") | Semantic Scholar Graph API | **OpenAlex** (primary, CORS-open) + Crossref, Europe PMC, PubMed, **ERIC**, **DOAJ**, **CORE**, Semantic Scholar, arXiv |
+| **Semantic literature search** ("200M+ peer-reviewed papers") | Semantic Scholar Graph API | **OpenAlex** (primary, CORS-open) + Crossref, Europe PMC, PubMed, **ERIC**, **DOAJ**, **CORE**, Semantic Scholar, arXiv, and opt-in **OpenAIRE** |
+| **Trial registry discovery** | clinical study registry | **ClinicalTrials.gov** API v2 — opt-in, separately rendered; registration and status are not efficacy evidence or published papers |
 | **Web search mode** | a search API | **Tavily** — keyless by default, optional free key; web pages render in a separate *not peer-reviewed* section and never enter the scholarly ranking |
 | **Chat with your own papers** (quotes + page numbers) | embeddings + vector store + LLM | **page-level BM25-ish scoring** (deterministic, no embeddings) + pdf.js text extraction + your LLM with `[n, p.4]` citations |
 | **Model choice** (OpenAI / Anthropic / Gemini tiers) | vendor keys, vendor markup | **your key**: OpenRouter, OpenAI, Anthropic, Gemini, or any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, DeepSeek, Groq…) |
@@ -58,6 +66,8 @@ model you supply. Nothing here reimplements a proprietary index.
 | `api.semanticscholar.org` | recommended | ❌ **no CORS header**; anonymous pool returns **429** | free key = 1 rps dedicated |
 | `export.arxiv.org/api` | no | ❌ no CORS header | free |
 | `api.tavily.com/search` | optional | ✅ browser-origin request returned **HTTP 200** in Chromium (2026-10-20) | keyless is rate-limited; free key = **1,000 credits/month** |
+| `api.openaire.eu/graph/v4/research-products` | no | ✅ browser-origin GET returned **HTTP 200** in Chromium (2026-11-17) | public Graph API; OpenAIRE attribution shown in UI |
+| `clinicaltrials.gov/api/v2/studies` | no | ✅ browser-origin GET returned **HTTP 200** in Chromium (2026-11-17) | public registry API; separate from paper search |
 | `openrouter.ai/api/v1` | yes | ✅ `*` | your key, 400+ models |
 | `api.anthropic.com` | yes | ✅ `*` **only with** `anthropic-dangerous-direct-browser-access: true` | your key |
 | `api.openai.com` | yes | ✅ `*` | your key |
@@ -89,13 +99,20 @@ CORS + key requirement decide it for a static page. Everything here was probed l
 | **ERIC** (`api.ies.ed.gov`) | 41k+ education hits for a RAG query, 4.4k for "structured literacy" + dyslexia | mixed — ED#### records usually serve a free PDF at `files.eric.ed.gov/fulltext/<id>.pdf`; **per-record, not uniform** (verified: some 200, some 404) | the education index; abstracts are long and research-grade; `peerreviewed` flag; OR-query syntax |
 | **DOAJ** (`doaj.org/api`) | ~20k journals, gold OA only | **100% open access by construction**, with free full-text links | bare multi-word queries are **AND** (4 words → 2 hits), so the adapter retries as OR when results are thin |
 | **CORE** (`api.core.ac.uk`) | 300M+ works from OA repositories | **OA only**, and `downloadUrl` gives direct PDFs | ⚠️ **needs a free API key.** Keyless access rides a small anonymous quota that returned 429 after a handful of probes (verified twice, browser or not) — an earlier "works keyless, CORS is origin-reflected" reading was wrong: it was just the first request of the allowance |
+| **OpenAIRE Graph v4** (`api.openaire.eu`) | Cross-disciplinary research products, filtered to publications | Aggregates repository and publication metadata; adds provenance, access labels, and conservative peer-review status | Opt-in. Browser-origin GET returned HTTP 200 in Chromium (2026-11-17). Results can overlap existing sources; instance review flags can conflict and are shown as mixed/unknown. OpenAIRE Graph data attribution is shown in the UI. DOI/title novelty is not a relevance or quality claim. |
+
+**Separate registry lane:** **ClinicalTrials.gov API v2** (`clinicaltrials.gov`) is opt-in. Results show NCT ID, registry status, study type/phase where supplied, and a canonical registry link. They are not deduplicated or ranked as papers; registration or status alone is not evidence of efficacy. Adding a trial to the library keeps it labelled as a registry record, and citation export uses a registration note (`@misc` in BibTeX, `TY - GEN` in RIS, `webpage` in CSL-JSON) rather than presenting it as a journal article.
+
+**Initial six-query check (2026-11-17):** With up to 15 results per source and DOI/normalized-title matching against the other currently responding scholarly sources, OpenAIRE yielded 63 candidate-new works after deduping OpenAIRE's own results. A repeat with the local OpenAlex key available found 64 unique finds across the same six queries (9, 11, 10, 16, 7, 11); CORE, Semantic Scholar, and arXiv remained intermittently unavailable. An informal topical review of up to five candidates per query (30 total; title and abstract where available) found all 30 related to the query wording; 1 of 30 lacked an abstract. This is a small, non-blinded screen rather than a calibrated relevance evaluation and is not a quality or ranking assessment. Novelty may be overstated where baseline APIs failed or records use nonmatching identifiers. In the 63-record candidate set, 40 had mixed instance review flags, 13 were flagged peer-reviewed, and 10 not peer-reviewed. OpenAIRE's mixed/unknown instance review status remains common.
+
+**Trial-lane spot check (2026-11-17):** Five intervention-applicable queries returned 10 records each. A title/summary keyword screen found 45/50 with an apparent topical match; the other five included adjacent or off-topic records. This measures search-result topicality only, not trial quality, outcome availability, or efficacy. The virtue-ethics query was excluded because it was not trial-applicable.
 
 **Evaluated and rejected:**
 
 | Source | Why not |
 |---|---|
 | **BASE** (400M+, ~60% OA) | API access is registration + IP allowlist — unusable from a browser, and pointless behind a shared worker |
-| **OpenAIRE** | Good OA coverage but **no CORS headers**, and it overlaps OpenAlex heavily — not worth a proxy hop |
+
 | **Internet Archive Scholar / fatcat** | Search endpoint 302s with no CORS; no clean JSON API |
 | **Zenodo / DataCite** | Excellent OA, but they index *datasets and software*, not literature — wrong axis for a paper search UI |
 | **bioRxiv / medRxiv** | Their API serves by DOI or date window, **not by keyword** — can't back a search box. Europe PMC already indexes preprints (PPR records), so this gap is covered anyway |
@@ -124,7 +141,7 @@ Four tools:
 
 | Tool | What it does |
 |---|---|
-| `search_literature` | Nine sources at once, deduped, deterministically ranked |
+| `search_literature` | Keyless scholarly sources by default, with opt-in scholarly sources including OpenAIRE; ClinicalTrials records are returned separately under `trials` |
 | `search_web` | Tavily web pages with title, URL, host, retrieval date and extracted text; optional domain and recency filters |
 | `expand_citations` | One level of citation-graph walking, both directions, provenance-tagged |
 | `get_record` | Resolve a DOI to a full metadata record |
@@ -140,21 +157,21 @@ A client needs the command and the environment, nothing else:
 ```
 
 Put keys in `env` rather than on a command line — process arguments are readable by every
-user on the machine. Five of the nine scholarly sources need neither a key nor a budget, and
+user on the machine. The six keyless scholarly sources need neither a key nor a budget, and
 `search_web` works keyless with a rate limit; `TAVILY_API_KEY` (or `CITEKIT_TAVILY_KEY`) raises
 it. A client that rewrites its MCP entry (OpenCode does) can use a `0600` key file instead:
 the server reads `~/.config/citekit/tavily.key`, or `CITEKIT_TAVILY_KEY_FILE=/path`. Environment
 wins over the file. Requires Node 18+ (global `fetch`).
 
-`tests/mcp-server.mjs` (19 assertions) spawns the server and speaks the real protocol rather
-than assuming it: lifecycle and version agreement, capability declaration, tool schemas, the
-`-32602`/`-32601` error paths, the rule that a notification is never answered, four live tool
-calls, and stdio shutdown.
+`tests/mcp-server.mjs` spawns the server and speaks the real protocol rather than assuming it:
+lifecycle and version agreement, capability declaration, tool schemas, the `-32602`/`-32601` error
+paths, the rule that a notification is never answered, live tool calls, and stdio shutdown. Its
+2026-11-17 run passed 20/20 assertions, including separate OpenAIRE and ClinicalTrials output.
 
 ## Web search (Tavily)
 
-The Web source is **on by default** in Discover. It is a separate lane, not a tenth scholarly
-source:
+The Web source is **on by default** in Discover. It is a separate lane from the ten scholarly
+sources and the ClinicalTrials registry lane:
 
 - **No key required.** The browser calls `api.tavily.com/search` directly with
   `X-Tavily-Access-Mode: keyless`. A free key in Settings raises the limit; the key stays in

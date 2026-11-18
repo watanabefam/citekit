@@ -138,6 +138,104 @@ ok('ERIC full-text URL convention resolves for a known full-text record', pinned
   console.log(`   · info: ${live}/${eds.length} ED records in this page have a live ERIC PDF (per-record, expected to vary)`);
 }
 
+// OpenAIRE normalization contract: instance-level review flags must not be collapsed by majority or order.
+head('1b. OpenAIRE normalization and provenance');
+const openAireFixture = {
+  id: 'oa-id-1', type: 'publication', mainTitle: 'A Test of Sleep and Circadian Performance',
+  publicationDate: '2024-05-12', authors: [{ fullName: 'Ada Lovelace' }, { name: 'Grace', surname: 'Hopper' }],
+  pids: [{ scheme: 'doi', value: '10.5555/TEST.1' }, { scheme: 'handle', value: '123/abc' }],
+  descriptions: ['<jats:p>Useful abstract.</jats:p>'], publisher: 'Test Press',
+  container: { name: 'Test Journal' }, bestAccessRight: { label: 'OPEN' },
+  instances: [
+    { refereed: 'peerReviewed', urls: ['https://publisher.example/paper'] },
+    { refereed: 'nonPeerReviewed', urls: ['https://repo.example/record'] }
+  ]
+};
+const mixedOA = LL.openAireToRecord(openAireFixture);
+ok('OpenAIRE maps stable identifiers, bibliographic fields and safe abstract text',
+   mixedOA.id === 'openaire:oa-id-1' && mixedOA.doi === '10.5555/test.1' && mixedOA.year === 2024 &&
+   mixedOA.authors.length === 2 && mixedOA.abstract === 'Useful abstract.' && mixedOA.url === 'https://doi.org/10.5555/test.1',
+   JSON.stringify({ id: mixedOA.id, doi: mixedOA.doi, year: mixedOA.year, url: mixedOA.url }));
+ok('OpenAIRE mixed instance review flags remain mixed and not peer-reviewed',
+   mixedOA.peerReviewStatus === 'mixed' && mixedOA.peerReviewed !== true, mixedOA.peerReviewStatus);
+ok('OpenAIRE preserves access label and attribution',
+   mixedOA.oa === true && mixedOA.openAireAttribution === 'OpenAIRE Graph', `${mixedOA.oaStatus} · ${mixedOA.openAireAttribution}`);
+ok('OpenAIRE missing review flags remain unknown',
+   LL.openAireToRecord({ ...openAireFixture, instances: [] }).peerReviewStatus === 'unknown');
+ok('OpenAIRE only marks consistently peer-reviewed instances as reviewed',
+   LL.openAireToRecord({ ...openAireFixture, instances: [{ refereed: 'peerReviewed' }] }).peerReviewed === true);
+ok('OpenAIRE keeps a consistent non-peer-reviewed flag',
+   LL.openAireToRecord({ ...openAireFixture, instances: [{ refereed: 'nonPeerReviewed' }] }).peerReviewStatus === 'not-peer-reviewed');
+const oaNoDoi = LL.openAireToRecord({ ...openAireFixture, pids: [], instances: [{ refereed: 'peerReviewed', urls: ['https://repo.example/record'] }] });
+ok('OpenAIRE falls back to a safe instance URL when no DOI exists',
+   oaNoDoi.doi === '' && oaNoDoi.url === 'https://repo.example/record', oaNoDoi.url);
+ok('OpenAIRE rejects a malformed response shape',
+   !!throws(() => LL.checkShape('openaire', { results: [] })));
+const liveOpenAire = await LL.searchOpenAIRE('sleep circadian performance', { per: 3 }).catch(e => { console.log('   OpenAIRE live err:', e.message); return []; });
+ok('OpenAIRE live v4 publication search returns normalized records',
+   liveOpenAire.length > 0 && liveOpenAire.every(r => r.source === 'OpenAIRE' && r.title && r.openAireAttribution),
+   `${liveOpenAire.length} normalized publications`);
+const oaMerged = LL.dedupe([mixedOA, { ...mixedOA, id: 'crossref:duplicate', source: 'Crossref' }]);
+ok('OpenAIRE duplicates collapse and retain source provenance',
+   oaMerged.length === 1 && oaMerged[0]._also.includes('OpenAIRE') && oaMerged[0]._also.includes('Crossref'));
+const ericLike = { id: 'eric:peer', title: mixedOA.title, source: 'ERIC', peerReviewed: true };
+const oaUnknownDup = { ...mixedOA, id: 'openaire:unknown-duplicate', peerReviewStatus: 'unknown', peerReviewed: false };
+const keepKnown = LL.dedupe([ericLike, oaUnknownDup]);
+ok('OpenAIRE unknown review state does not erase another source\'s peer-review flag',
+   keepKnown.length === 1 && keepKnown[0].peerReviewStatus === 'peer-reviewed' && keepKnown[0].peerReviewed === true,
+   keepKnown[0]?.peerReviewStatus);
+const oaMixedDup = { ...mixedOA, id: 'openaire:mixed-duplicate', peerReviewStatus: 'mixed', peerReviewed: false };
+const downgraded = LL.dedupe([ericLike, oaMixedDup]);
+ok('conflicting OpenAIRE review state downgrades a merged record to mixed',
+   downgraded.length === 1 && downgraded[0].peerReviewStatus === 'mixed' && downgraded[0].peerReviewed === false);
+
+head('1c. ClinicalTrials.gov trial lane');
+const trialFixture = { protocolSection: {
+  identificationModule: { nctId: 'NCT00001234', briefTitle: 'Exercise and Cognitive Performance' },
+  statusModule: { overallStatus: 'RECRUITING' },
+  descriptionModule: { briefSummary: 'A brief study summary.' },
+  designModule: { studyType: 'INTERVENTIONAL', phases: ['PHASE2', 'NA'] }
+} };
+const trial = LL.clinicalTrialToRecord(trialFixture);
+ok('ClinicalTrials maps registry id, exact status, canonical URL and type',
+   trial.kind === 'trial' && trial.nctId === 'NCT00001234' && trial.status === 'RECRUITING' &&
+   trial.url === 'https://clinicaltrials.gov/study/NCT00001234' && trial.studyType === 'INTERVENTIONAL');
+ok('ClinicalTrials preserves summary and removes NA from display phases',
+   trial.abstract === 'A brief study summary.' && trial.phases.join(',') === 'PHASE2');
+ok('ClinicalTrials does not invent status or phase',
+   LL.clinicalTrialToRecord({ protocolSection: { identificationModule: { nctId: 'NCT00000001', briefTitle: 'No metadata' } } }).status === 'UNKNOWN');
+const liveTrials = await LL.searchClinicalTrials('exercise cognition mental health', { per: 3 }).catch(e => { console.log('   ClinicalTrials live err:', e.message); return []; });
+ok('ClinicalTrials.gov live v2 search returns typed registry records',
+   liveTrials.length > 0 && liveTrials.every(r => r.kind === 'trial' && /^NCT\d+$/.test(r.nctId) && r.url.includes(r.nctId)),
+   `${liveTrials.length} trial records`);
+ok('ClinicalTrials rejects a malformed response shape', !!throws(() => LL.checkShape('clinicaltrials', { totalCount: 1 })));
+const separated = LL.splitSearchRecords([trial, { ...trial, id: 'paper:1', kind: 'metadata', source: 'OpenAlex' }]);
+ok('ClinicalTrials records are separated before scholarly dedupe and ranking',
+   separated.trials.length === 1 && separated.scholarly.length === 1 && separated.scholarly[0].kind !== 'trial');
+const trialBib = LL.cite.bibtex(trial);
+ok('trial citations are exported as registrations, not journal articles',
+   trialBib.startsWith('@misc{') && trialBib.includes('ClinicalTrials.gov') &&
+   trialBib.includes('NCT00001234') && /not a published paper/.test(trialBib) && !/@article/.test(trialBib));
+const trialRis = LL.cite.ris(trial);
+ok('trial RIS uses a generic type and a registration note',
+   /^TY  - GEN/m.test(trialRis) && /^ID  - NCT00001234/m.test(trialRis) &&
+   /not a published paper/.test(trialRis) && !/^TY  - JOUR/m.test(trialRis));
+const trialCsl = JSON.parse(LL.cite.csljson(trial));
+ok('trial CSL-JSON is a webpage with a registry note, not article-journal',
+   trialCsl.type === 'webpage' && trialCsl.number === 'NCT00001234' &&
+   trialCsl['container-title'] === 'ClinicalTrials.gov' && /not a published paper/.test(trialCsl.note));
+ok('trial APA names the registration and status instead of inventing authors',
+   /ClinicalTrials.gov registration NCT00001234/.test(LL.cite.apa(trial)) &&
+   /status: RECRUITING/.test(LL.cite.apa(trial)) && !/Unknown/.test(LL.cite.apa(trial)));
+ok('paper citations still use article-journal',
+   LL.cite.bibtex({ ...trial, kind: 'metadata', authors: ['Ada Lovelace'], title: 'Paper', venue: 'Journal', doi: '10.1/x' }).startsWith('@article{') &&
+   JSON.parse(LL.cite.csljson({ ...trial, kind: 'metadata', authors: ['Ada Lovelace'], title: 'Paper', venue: 'Journal', doi: '10.1/x' })).type === 'article-journal');
+
+LL.ingestRecord(trial);
+const trialCtx = LL.buildContext('exercise cognition', 'library');
+ok('Trial library context labels registration and status, not publication',
+   trialCtx.blocks.includes('registered study record (not a published paper') && trialCtx.blocks.includes('RECRUITING'));
+
 const dj = await LL.searchDOAJ(EDUQ, { per: 10 }).catch(() => []);
 ok('DOAJ returns gold-OA journal articles', dj.length >= 5, `${dj.length} records (raw AND query alone returned 2 — OR widening kicked in)`);
 ok('DOAJ widening does not duplicate records', new Set(dj.map(r => r.id)).size === dj.length, `${new Set(dj.map(r => r.id)).size} unique ids`);

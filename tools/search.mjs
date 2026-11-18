@@ -31,7 +31,7 @@ import { screenDois } from './fidelity.mjs';
 import { openAlexKey, critiqueDois, crossrefRetractionFallback } from './fidelity.mjs';
 
 const KEYLESS = ['openalex', 'crossref', 'epmc', 'pubmed', 'eric', 'doaj'];
-const OPT_IN = ['s2', 'arxiv', 'core'];
+const OPT_IN = ['s2', 'arxiv', 'core', 'openaire', 'clinicaltrials'];
 
 function parseArgs(argv) {
   const o = { queries: [], per: 8, sources: KEYLESS.slice(), oaOnly: false, yearFrom: '', json: false, md: false, out: '', enrich: true, help: false, listSources: false,
@@ -86,7 +86,7 @@ const HELP = `citekit headless search
 Flags
   --per N            results per source (default 8)
   --sources csv      default: ${KEYLESS.join(',')}
-                     opt-in (need proxy/key): ${OPT_IN.join(',')}
+                     opt-in: ${OPT_IN.join(',')} (s2/arxiv/core need proxy/key)
                      web: Tavily (keyless by default)
   --oa-only          open-access filter (sources that support it)
   --year-from YYYY   publication-year floor (sources that support it)
@@ -134,12 +134,14 @@ async function main() {
     s2: (q, opts) => LL.searchS2(q, opts),
     arxiv: (q, opts) => LL.searchArxiv(q, opts),
     core: (q, opts) => LL.searchCORE(q, opts),
+    openaire: (q, opts) => LL.searchOpenAIRE(q, opts),
+    clinicaltrials: (q, opts) => LL.searchClinicalTrials(q, opts),
   };
 
   if (o.listSources) {
     console.log('known sources:', Object.keys(registry).join(', '));
     console.log('default:      ', KEYLESS.join(', '));
-    console.log('opt-in:       ', OPT_IN.join(', '), '(proxy/key required)');
+    console.log('opt-in:       ', OPT_IN.join(', '), '(s2/arxiv/core need proxy/key; openaire/clinicaltrials are keyless)');
     console.log('web:           web (Tavily; keyless or --tavily-key)');
     return;
   }
@@ -185,7 +187,7 @@ async function main() {
         if (c && Array.isArray(c.records) && Date.now() - c.at <= o.maxAge * 3600e3) {
           out.cache = out.cache || { hits: 0, misses: 0, maxAge: o.maxAge };
           out.cache.hits++;
-          out.queries[query] = { count: c.records.length, errors: c.errors || [], records: c.records, cachedAt: c.at };
+          out.queries[query] = { count: c.records.length, errors: c.errors || [], records: c.records, trials: c.trials || [], cachedAt: c.at };
           process.stderr.write(`   cache hit: ${c.records.length} records, ${humanAge(c.at)} old `
             + `(retraction screen still runs fresh)\n`);
           continue;
@@ -199,19 +201,20 @@ async function main() {
       if (res.status === 'fulfilled') all.push(...res.value);
       else errs.push(`${chosen[i]}: ${res.reason?.message || res.reason}`);
     });
-    let ranked = [];
+    let ranked = [], trials = [];
     try {
-      // Web and papers stay separate: a web page must never be merged into a paper by title,
-      // and its provider score must not be replaced by the scholarly rank formula.
-      const rawWeb = all.filter(r => r.kind === 'web');
-      const rawPapers = all.filter(r => r.kind !== 'web');
+      // Web and trials stay separate: neither is deduplicated into papers or paper-ranked.
+      const split = LL.splitSearchRecords(all);
+      const rawWeb = split.web;
+      const rawPapers = split.scholarly;
+      trials = split.trials;
       const clean = LL.dedupe(rawPapers).filter(r => r.title && r.title !== '(untitled)');
       const papers = LL.rankResults(query, o.enrich ? await LL.enrichWithOpenAlex(clean) : clean);
       const web = LL.rankWebResults(query, LL.dedupeWeb(rawWeb));
       ranked = papers.concat(web);
     } catch (e) { errs.push('rank/enrich: ' + e.message); }
     process.stderr.write(`   ${all.length} raw → ${ranked.length} unique${errs.length ? ' · errors: ' + errs.join(' | ') : ''}\n`);
-    out.queries[query] = { count: ranked.length, errors: errs, records: ranked };
+    out.queries[query] = { count: ranked.length, errors: errs, records: ranked, trials };
     if (o.since) {
       // What is NEW relative to the last run of this same query. Without a baseline there is nothing
       // to compare against, so everything is new and the output says so rather than implying change.
@@ -229,7 +232,7 @@ async function main() {
     out.cache.misses++;
     try {
       fs.mkdirSync(cacheDir, { recursive: true });
-      fs.writeFileSync(cfile, JSON.stringify({ at: Date.now(), records: ranked, errors: errs }));
+      fs.writeFileSync(cfile, JSON.stringify({ at: Date.now(), records: ranked, trials, errors: errs }));
     } catch { /* cache write is best-effort */ }
   }
 
@@ -371,7 +374,7 @@ export function toMarkdown(out) {
         `### ${r.title || '(untitled)'} (${r.year || 'n.d.'})`,
         `**Authors:** ${authors(r)}`,
         `**Type:** ${r.kind === 'web' ? 'web page (not peer-reviewed)' : 'scholarly record'}`,
-        `**Venue:** ${r.venue || '—'}  ·  **cited by:** ${r.citations || 0}  ·  **source:** ${r.source || '—'}${r.oa ? '  ·  **OA**' : ''}`,
+        `**Venue:** ${r.venue || '—'}  ·  **cited by:** ${r.citations || 0}  ·  **source:** ${r.source || '—'}${r.openAireAttribution ? '  ·  OpenAIRE Graph (CC BY attribution)' : ''}${r.oa ? '  ·  **OA**' : ''}`,
         `**DOI:** ${r.doi || '—'}${r.url ? `  ·  ${r.url}` : ''}${r.pdf ? `\n**PDF:** ${r.pdf}` : ''}`,
         r.retraction?.status === 'retracted' ? `**\u26a0 RETRACTED** \u2014 do not cite (detected via ${r.retraction.evidence.join(', ')})` : '',
         r.retraction?.status === 'is-a-notice' ? '**Notice of retraction** \u2014 this record is the notice, not the retracted work' : '',
@@ -379,6 +382,12 @@ export function toMarkdown(out) {
         r.isNew ? '**NEW** \u2014 not present in the previous run of this query' : '',
         abs ? `\n${abs}` : '\n_[no abstract]_', '',
       ].filter(x => x !== ''));
+    }
+    if (res.trials?.length) {
+      lines.push('\n### Registered studies (ClinicalTrials.gov)\n');
+      for (const r of res.trials) {
+        lines.push(`#### ${r.title || '(untitled)'}`, `**Type:** registered study · not a published paper`, `**NCT ID:** ${r.nctId || '—'} · **Status:** ${r.status || 'UNKNOWN'} · **Study type:** ${r.studyType || '—'} · **Phase:** ${(r.phases || []).join(', ') || '—'}`, `**Registry:** ${r.url || '—'}`, `**Summary:** ${(r.abstract || 'No summary provided').replace(/\s+/g, ' ').slice(0, 500)}`, 'Registration or status alone is not evidence of efficacy.', '');
+      }
     }
   }
   return lines.join('\n');

@@ -69,12 +69,13 @@ const SOURCES = [
   ['CORE', () => LL.searchCORE(q_, { per: 20 })],
   ['PubMed', () => LL.searchPubMed(q_, { per: 20 })],
   ['SemanticScholar', () => LL.searchS2(q_, { per: 20 })],
-  ['arXiv', () => LL.searchArxiv(q_, { per: 20 })]
+  ['arXiv', () => LL.searchArxiv(q_, { per: 20 })],
+  ['OpenAIRE', () => LL.searchOpenAIRE(q_, { per: 20 })]
 ];
 
 let q_ = '';
 const queries = process.argv.slice(2);
-if (!queries.length) queries.push('structured literacy dyslexia reading intervention', 'retrieval augmented generation');
+if (!queries.length) queries.push('sleep circadian performance', 'exercise cognition mental health', 'habit formation behavior change', 'stress resilience mindfulness', 'virtue ethics practical wisdom', 'spirituality meaning wellbeing');
 
 for (const query of queries) {
   q_ = query;
