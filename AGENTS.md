@@ -4,8 +4,9 @@ Agent instructions for this repository. Read before making any change.
 
 ## What this is
 
-A single-file, no-backend BYOK academic research workspace: nine scholarly sources, a Tavily-backed
-web source, deterministic ranking, citation-grounded answers through the user's own model key.
+A single-file, no-backend BYOK academic research workspace: ten scholarly sources, a separate
+ClinicalTrials.gov registry lane, a Tavily-backed web source, deterministic ranking, and
+citation-grounded answers through the user's own model key.
 `index.html` is the whole app — no build step, no bundler, no dependencies. Web search is on by
 default, runs in a separate lane, and is always labelled not peer-reviewed.
 
@@ -44,8 +45,10 @@ change the harness in one place. `tests/screenshots/` is gitignored output.
 - **A green headless run is not browser-callability.** Node sends no `Origin` and draws on no browser
   quota, so an endpoint the tests reach happily can still fail in the page.
 - **No secrets in this repository.** API keys live in the browser's `localStorage`, entered by the
-  user, or in the process environment for tools. Never write one into a file here, never ask for one
-  in chat, never type one into a page.
+  user; in the process environment for tools; or in a `0600` file under `~/.config/citekit/`.
+  Never write one into a file here, never ask for one in chat, never type one into a page. The MCP
+  server's fallback path and `.gitignore`'s `*.key` pattern exist so a key cannot be committed by
+  accident — both must stay in place.
 - **Web results are untrusted and separate.** They never enter the scholarly ranking, are never
   merged with a paper by title, and are labelled not peer-reviewed in the UI and the prompt. Keyless
   Tavily is rate-limited; the free key is the escape hatch.
@@ -68,6 +71,62 @@ tools/                  load-ll.mjs (shared harness), search.mjs (CLI), mcp-serv
 skills/evidence-search/ portable Agent Skills — installed (symlinked into the host skills dir); validated: compliance on 3 pressure topics + trigger eval clean. Protocol + harness: validation-protocol.md, validation/
 README.md               the teardown, measured tables, and known-gaps list
 ```
+
+## MCP tool discovery and key custody
+
+### Finding the tools
+
+The server is registered in the host as **`CiteKit`**, exposing four tools: `search_web`,
+`search_literature`, `expand_citations`, `get_record`.
+
+**Search for it by name, not by intent.** Measured 2026-11-11 in Freebuff: the queries
+`citekit citation DOI verify` and `citation DOI reference verify` returned **zero** servers, while
+`CiteKit` and `search_literature` each returned all four tools. The host's tool-search index keys on
+server and tool names, so a prose question about what the tools *do* reliably misses them. That is an
+argument-shape bug, not a broken server — do not go hunting config first.
+
+If a name search also returns nothing, verify the server independently before touching any config:
+
+```bash
+node tests/mcp-server.mjs     # 20 assertions, spawns the real server over stdio
+```
+
+### Where the keys live — never in this repo
+
+Every key is read **environment first**, then from a `0600` file under `~/.config/citekit/`. Point
+any key at a different file with `CITEKIT_<NAME>_KEY_FILE` (e.g. `CITEKIT_S2_KEY_FILE`).
+
+**The key directory is `~/.config/citekit/`** — run `ls ~/.config/citekit/` to see which key files
+exist (snapshot 2026-11-18: `core.key`, `openalex.key`, `tavily.key`; no `s2.key`). The directory
+holds keys only and sits outside this repo.
+
+**Tavily's key file is `~/.config/citekit/tavily.key`.** The MCP server (`tools/mcp-server.mjs`)
+reads it automatically. The CLI (`tools/search.mjs`) does **not** — it resolves only `--tavily-key`,
+`CITEKIT_TAVILY_KEY`, then `TAVILY_API_KEY`, and silently falls back to keyless mode when all three
+are absent. For a keyed CLI search:
+
+```bash
+node tools/search.mjs "q" --sources web --tavily-key "$(cat ~/.config/citekit/tavily.key)"
+```
+
+| Key | Environment | File | Effect |
+|---|---|---|---|
+| OpenAlex | `CITEKIT_OPENALEX_KEY` | `openalex.key` | raises the budget from $0.10/day to $1/day |
+| Semantic Scholar | `CITEKIT_S2_KEY` | `s2.key` | lifts the shared-pool 429 |
+| CORE | `CITEKIT_CORE_KEY` | `core.key` | lifts the anonymous quota |
+| Tavily | `CITEKIT_TAVILY_KEY` / `TAVILY_API_KEY` | `tavily.key` | raises the web-search limit |
+
+All four are optional; the six keyless scholarly sources work with none of them. Write a key file
+without printing its value:
+
+```bash
+umask 077; mkdir -p ~/.config/citekit
+printf '%s' "$YOUR_KEY" > ~/.config/citekit/s2.key && chmod 600 ~/.config/citekit/s2.key
+```
+
+Never add a key to `~/.freebuff/mcp.json`, a committed `.env`, or a shell command that lands in
+history. The environment block in a client config is fine at runtime, but clients rewrite that file
+and can drop the block — which is why the file fallback exists.
 
 <!-- SPECKIT-BRIDGE START -->
 # Spec-Driven Development (Spec Kit)

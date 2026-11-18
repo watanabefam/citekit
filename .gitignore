@@ -14,3 +14,7 @@ __pycache__/
 *.dev.vars
 .dev.vars
 proxy/.dev.vars
+
+# Key files belong in ~/.config/citekit/, never here. Belt and braces.
+*.key
+*.key.*

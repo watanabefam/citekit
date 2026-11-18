@@ -1,6 +1,6 @@
 ---
 name: evidence-search
-description: "Use when searching literature or researching a topic — literature scans, questions like what's the evidence on X, finding papers, substantiating a claim, or any citation-grounded answer. Also the portable skill behind CiteKit, the single-file BYOK academic research workspace in this repo. Triggers: CiteKit, evidence search, literature search, find papers, scholarly sources, citations."
+description: "Use when finding papers or citing literature evidence — literature scans, the evidence on X, finding papers, substantiating a claim, or any citation-grounded answer. Also the portable skill behind CiteKit, the single-file BYOK academic research workspace in this repo. Triggers: CiteKit, evidence search, literature search, find papers, scholarly sources, citations."
 license: MIT
 compatibility: Network access required. Host-native search, or the bundled scholarly APIs (no key for most), or both. An LLM key is only needed for in-app synthesis.
 metadata:
@@ -15,7 +15,7 @@ metadata:
 Find the literature on a question, then answer from it with citations a reader can check.
 Works in any agent that reads the Agent Skills standard (OpenCode, Codex, Claude Code, Hermes).
 
-## When
+## When to Use
 
 - "What's the evidence on X?", "find papers about X", a literature scan, a claim to substantiate.
 - Any answer that will rest on outside sources and be read by someone who might check it.
@@ -45,9 +45,9 @@ web and general questions.
 If the host exposes one, use it first and cite it like any other source.
 
 **If CiteKit is available, it is usually the better start.** CiteKit ships an MCP server —
-`tools/mcp-server.mjs` — exposing the nine-source scholarly pipeline and a `search_web` tool, so an
-agent that has it registered reaches both literature and the general web with no browser and no
-account. `CITEKIT_OPENALEX_KEY` and `TAVILY_API_KEY` are optional and only raise quota; web search
+`tools/mcp-server.mjs` — exposing the ten-source scholarly pipeline, a separate ClinicalTrials.gov
+registry lane, and a `search_web` tool, so an agent that has it registered reaches both literature
+and the general web with no browser and no account. `CITEKIT_OPENALEX_KEY` and `TAVILY_API_KEY` are optional and only raise quota; web search
 works keyless with a rate limit. Prefer it when registered. When it is **not** registered, do not
 conclude the pipeline is out of reach: fall through to rung 2 or 3 and call the same APIs by shell.
 
@@ -210,5 +210,8 @@ failures, not hypothetical ones.
 - `references/scholarly-apis.md` — the verified source table: which are CORS-open, what each costs,
   which need keys, OA/full-text routes, per-source query semantics, and the evaluated-and-rejected
   list with reasons.
+- `references/local-checkout.md` — before trusting a run on a machine with a CiteKit clone: the
+  three-command check, and the HTTP 401 signature where a stale OpenAlex key silently degrades the
+  retraction screen instead of failing.
 - Companion skills when present: `grounded-citations` (citation ledger mechanics), and a
   `byok-browser-apps` reference implementation of the whole pipeline as a static app.
