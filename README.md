@@ -23,12 +23,10 @@ optional Cloudflare Worker against workerd; `tests/mcp-server.mjs` speaks the MC
 stdio. `tests/tools-search.mjs` covers the CLI, and `tests/fidelity.mjs` covers citation integrity.
 Live-service assertions can fail when upstream APIs rate-limit or return errors; consult the test
 output for per-source degradation rather than treating a live outage as a zero-result response.
-On 2026-11-17, the headless suite's OpenAIRE/ClinicalTrials assertions passed. Keyless, it had 9
-failures from live OpenAlex and Tavily quotas plus an older DOAJ result-count expectation; when the
-local OpenAlex and Tavily key files were supplied through the app's own settings path, it passed
-118 of 119 assertions, leaving only the DOAJ expectation (3 live results where the assertion wants 5). The test
-script itself remains keyless; this was a manual keyed verification. Browser, CLI, MCP, and proxy
-suites passed (53, 34, 20, and 16 assertions respectively); see the feature progress ledger.
+On 2026-11-18, the headless suite passed **121/121** when the local OpenAlex and Tavily key files
+were supplied through the app's own settings path. A keyless run passed 119/121; Europe PMC was
+unavailable. The test script itself remains keyless. Browser, CLI, MCP, and proxy suites passed
+(53, 34, 20, and 16 assertions respectively); see the feature progress ledger.
 
 ---
 

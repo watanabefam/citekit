@@ -563,6 +563,11 @@ async function searchERIC(q, {yearFrom, per = 20}) {
 
 /* --- DOAJ: free, CORS-open, gold open-access journals only → full text is free by definition.
        DOAJ treats bare multi-word queries as AND (4 words → 2 hits), so widen to OR when thin. --- */
+const doajNeedsWidening = results => results.length < 3;
+function mergeDoajResults(initial, extra) {
+  const seen = new Set(initial.map(r => r.id));
+  return initial.concat(extra.filter(r => !seen.has(r.id)));
+}
 async function searchDOAJ(q, {per = 20} = {}) {
   const run = async query => {
     const d = checkShape('doaj', await jget(`https://doaj.org/api/search/articles/${encodeURIComponent(query)}?pageSize=${per}`));
@@ -570,12 +575,11 @@ async function searchDOAJ(q, {per = 20} = {}) {
   };
   let results = await run(q);
   let widened = false;
-  if (results.length < 3) {
+  if (doajNeedsWidening(results)) {
     const alt = terms(q).slice(0, 6).join(' OR ');
     if (alt) {
       widened = true;
-      const seen = new Set(results.map(r => r.id));
-      results = results.concat((await run(alt)).filter(r => !seen.has(r.id)));
+      results = mergeDoajResults(results, await run(alt));
     }
   }
   return results.slice(0, per).map(r => {
@@ -1638,7 +1642,7 @@ refreshBadge(); renderLibrary(); renderResults(); renderCtxInfo();
 }
 window.LL = { runSearch, buildContext, cite, callLLM, S, LIB: () => LIB, RESULTS: () => RESULTS, TRIAL_RESULTS: () => TRIAL_RESULTS, WEB_RESULTS: () => WEB_RESULTS, ask, mdToHtml,
               addFiles, ingestRecord, searchOpenAlex, searchCrossref, searchEPMC, searchPubMed, searchS2, searchArxiv,
-              searchERIC, searchDOAJ, searchCORE, searchOpenAIRE, openAireToRecord, searchClinicalTrials, clinicalTrialToRecord, searchWeb, splitSearchRecords, dedupe, dedupeWeb, canonicalUrl, rankWebResults, WEB_TEXT_CAP,
+              searchERIC, searchDOAJ, doajNeedsWidening, mergeDoajResults, searchCORE, searchOpenAIRE, openAireToRecord, searchClinicalTrials, clinicalTrialToRecord, searchWeb, splitSearchRecords, dedupe, dedupeWeb, canonicalUrl, rankWebResults, WEB_TEXT_CAP,
               checkShape, enrichWithOpenAlex, rankScore, rankResults,
               expandCitations, openAlexToRecord, openAlexIdsFor };
 </script>

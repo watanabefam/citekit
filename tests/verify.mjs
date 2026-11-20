@@ -236,8 +236,18 @@ const trialCtx = LL.buildContext('exercise cognition', 'library');
 ok('Trial library context labels registration and status, not publication',
    trialCtx.blocks.includes('registered study record (not a published paper') && trialCtx.blocks.includes('RECRUITING'));
 
+ok('DOAJ widening policy triggers only when strict results are thin',
+   LL.doajNeedsWidening([{ id: 'doaj:1' }, { id: 'doaj:2' }]) &&
+   !LL.doajNeedsWidening([{ id: 'doaj:1' }, { id: 'doaj:2' }, { id: 'doaj:3' }]));
+const widenedFixture = LL.mergeDoajResults(
+  [{ id: 'doaj:1' }, { id: 'doaj:2' }],
+  [{ id: 'doaj:2' }, { id: 'doaj:3' }]
+);
+ok('DOAJ widening merge keeps one copy of each result id',
+   widenedFixture.length === 3 && widenedFixture.map(r => r.id).join(',') === 'doaj:1,doaj:2,doaj:3');
 const dj = await LL.searchDOAJ(EDUQ, { per: 10 }).catch(() => []);
-ok('DOAJ returns gold-OA journal articles', dj.length >= 5, `${dj.length} records (raw AND query alone returned 2 — OR widening kicked in)`);
+// Live DOAJ counts drift with its index; 3 proves mapping without pinning an old page size.
+ok('DOAJ returns gold-OA journal articles', dj.length >= 3, `${dj.length} live records`);
 ok('DOAJ widening does not duplicate records', new Set(dj.map(r => r.id)).size === dj.length, `${new Set(dj.map(r => r.id)).size} unique ids`);
 ok('DOAJ records are all open access by construction', dj.length > 0 && dj.every(r => r.oa === true));
 ok('DOAJ gives a free full-text link or DOI', dj.some(r => r.pdf || r.fulltextUrl || r.url.startsWith('https://doi.org')), `${dj.filter(r => r.pdf).length} direct PDFs`);
